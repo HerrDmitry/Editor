@@ -26,6 +26,9 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 - **Content_Area**: The scrollable region within the Main_Window where file contents are displayed
 - **Status_Bar**: The bar at the bottom of the Main_Window displaying file metadata such as file size, encoding, and line count
 - **Backend**: The C# .NET 10 Photino.Blazor host responsible for native file system access and interop with the React UI
+- **Line_Index**: A data structure maintained by the Backend that maps line numbers to byte offsets in the file, enabling O(1) seeking to any line without loading the entire file
+- **Visible_Range**: The range of line numbers currently visible in the Content_Area, determined by the scroll position and viewport height
+- **Virtual_Scrollbar**: A scrollbar whose total height represents the full line count of the file, even though only the Visible_Range of lines is loaded in memory
 
 ## Requirements
 
@@ -47,10 +50,11 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 #### Acceptance Criteria
 
 1. WHEN the user triggers the open file action, THE App SHALL display the native OS File_Picker dialog
-2. WHEN the user selects a file in the File_Picker and confirms, THE Backend SHALL read the file contents from disk and send them to the File_Viewer
+2. WHEN the user selects a file in the File_Picker and confirms, THE Backend SHALL open the file for streamed reading and send file metadata (total line count, file size, encoding) to the File_Viewer
 3. WHEN the user cancels the File_Picker dialog, THE App SHALL return to its previous state without changes
 4. IF the selected file cannot be read due to permission errors, THEN THE App SHALL display a descriptive error message to the user
 5. IF the selected file cannot be read because the file no longer exists, THEN THE App SHALL display a descriptive error message to the user
+6. THE App SHALL be able to open files of any size without loading the entire file into memory
 
 ### Requirement 3: Display File Contents
 
@@ -58,12 +62,14 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 
 #### Acceptance Criteria
 
-1. WHEN a file is successfully loaded, THE File_Viewer SHALL display the full text contents of the file in the Content_Area
-2. WHEN a file is successfully loaded, THE File_Viewer SHALL display line numbers alongside each line of text
+1. WHEN a file is successfully opened, THE File_Viewer SHALL display the text content visible at the current scroll position in the Content_Area
+2. WHEN a file is successfully opened, THE File_Viewer SHALL display line numbers alongside each visible line of text
 3. THE File_Viewer SHALL render file contents using a monospaced font
-4. WHEN the file contents exceed the visible area, THE Content_Area SHALL provide vertical scrolling to access all content
-5. WHEN the file contents contain lines wider than the visible area, THE Content_Area SHALL provide horizontal scrolling to access the full line width
-6. THE File_Viewer SHALL preserve the original line endings and whitespace of the file contents
+4. THE Content_Area SHALL provide a vertical scrollbar that represents the full extent of the file, allowing the user to scroll to any position in the file
+5. WHEN the user scrolls, THE Backend SHALL stream the text content for the newly visible line range and send it to the File_Viewer
+6. WHEN the file contents contain lines wider than the visible area, THE Content_Area SHALL provide horizontal scrolling to access the full line width
+7. THE File_Viewer SHALL preserve the original line endings and whitespace of the file contents
+8. THE Backend SHALL only hold the currently visible portion of the file in memory, not the entire file
 
 ### Requirement 4: Title Bar File Indication
 
@@ -85,15 +91,18 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 3. WHEN a file is successfully loaded, THE Status_Bar SHALL display the detected text encoding of the file (e.g., UTF-8, ASCII)
 4. WHEN no file is open, THE Status_Bar SHALL display no metadata
 
-### Requirement 6: Large File Handling
+### Requirement 6: Streamed File Reading
 
-**User Story:** As a user, I want the application to handle large files gracefully, so that the application remains responsive.
+**User Story:** As a user, I want the application to handle files of any size, so that I can view large log files, data dumps, and other large text files without the application becoming unresponsive.
 
 #### Acceptance Criteria
 
-1. WHEN a file larger than 10 MB is selected, THE App SHALL display a warning to the user before loading the file
-2. WHILE a file is being loaded, THE App SHALL display a loading indicator in the Content_Area
-3. IF a file exceeds 50 MB, THEN THE App SHALL decline to open the file and display a message indicating the file is too large
+1. THE App SHALL be able to open files of any size (no upper limit)
+2. WHEN a file is opened, THE Backend SHALL perform an initial scan to count total lines and build a line offset index, then send metadata (total line count, file size, encoding) to the UI
+3. WHILE the initial scan is in progress, THE App SHALL display a loading indicator
+4. WHEN the UI requests a range of lines (e.g. lines 500-550), THE Backend SHALL seek to the correct file offset and read only the requested lines from disk
+5. THE Backend SHALL NOT load the entire file into memory at any point
+6. THE scrollbar in the Content_Area SHALL reflect the total number of lines in the file, allowing the user to jump to any position
 
 ### Requirement 7: Backend-to-UI Interop
 
@@ -101,9 +110,10 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 
 #### Acceptance Criteria
 
-1. WHEN the Backend reads a file, THE Backend SHALL send the file contents and metadata to the React UI via Photino's web message interop
+1. WHEN the Backend reads a line range from a file, THE Backend SHALL send the line content and line range metadata to the React UI via Photino's web message interop
 2. WHEN the React UI requests a file open action, THE Backend SHALL receive the request via Photino's web message interop and invoke the native File_Picker
-3. IF the interop message fails to deliver, THEN THE App SHALL display an error message indicating a communication failure
+3. WHEN the React UI requests a line range (scroll event), THE Backend SHALL receive the request and respond with the requested lines
+4. IF the interop message fails to deliver, THEN THE App SHALL display an error message indicating a communication failure
 
 ### Requirement 8: Keyboard Shortcut for Open File
 
