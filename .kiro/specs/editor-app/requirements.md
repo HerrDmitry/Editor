@@ -7,12 +7,14 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 ### Implementation Notes
 
 - **Photino.Blazor version**: 4.0.13 (not 3.x — older versions have incompatible APIs)
+- **No npm/node_modules dependency**: The frontend is part of the C# project. TSX files live in `src/EditorApp/src/` and are compiled to JS by `tsc.js` (the TypeScript compiler, bundled in `src/EditorApp/scripts/`). React and ReactDOM are included as standalone JS files in `wwwroot/js/`. The only external dependency is the Node.js runtime (for running `tsc.js`).
+- **TSX compilation**: TSX files use `React.createElement` output (not JSX transform). The .csproj `CompileTypeScript` target runs `node scripts/tsc.js -p tsconfig.json` before every build. Output goes to `wwwroot/js/`.
+- **React as standalone scripts**: `react.js` and `react-dom.js` are included as standalone UMD/development builds in `wwwroot/js/`. They are loaded via `<script>` tags in `index.html` and expose `React` and `ReactDOM` as globals.
 - **Resource embedding**: All `wwwroot/` files are embedded as `EmbeddedResource` items (not `Content`). The .csproj must set `GenerateEmbeddedFilesManifest=true`, `StaticWebAssetsEnabled=false`, and use `ManifestEmbeddedFileProvider` at runtime. This eliminates the need for a physical `wwwroot/` directory at runtime.
 - **Interop direction**: Frontend → Backend uses `window.external.sendMessage(json)`. Backend → Frontend uses `window.external.receiveMessage(callback)` (NOT `window.addEventListener('message')`).
-- **Keyboard shortcuts**: Must be handled in exactly one place (React `keydown` listener) to avoid duplicate native file dialogs. Do NOT add a second handler in `index.html`.
+- **Keyboard shortcuts**: Must be handled in exactly one place (the React `keydown` listener in the App component) to avoid duplicate native file dialogs. Do NOT add a second handler in `index.html`.
 - **Non-JSON messages**: The Blazor framework sends internal messages (e.g. starting with `_blazor`) through the same web message channel. The MessageRouter must skip messages that don't start with `{`.
-- **Frontend build integration**: The .csproj `BuildReactApp` target runs `npm ci` and `npm run build` before every C# build, then copies `frontend/dist/assets/*` into `wwwroot/assets/`. No manual copy step needed.
-- **Single InteropService instance**: The React App component must create one `InteropService` in `useEffect` and use that same instance for both sending requests and receiving responses. Creating separate instances causes callbacks to be registered on a different instance than the one receiving messages.
+- **Single InteropService instance**: The React App component must create one InteropService and use that same instance for both sending requests and receiving responses. Creating separate instances causes callbacks to be registered on a different instance than the one receiving messages.
 
 ## Glossary
 

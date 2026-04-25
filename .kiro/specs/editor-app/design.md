@@ -15,11 +15,46 @@ The Editor App is a cross-platform desktop application for read-only file viewin
 ### Technology Stack
 
 - **Backend**: C# .NET 10, Photino.NET, Photino.Blazor 4.0.13
-- **Frontend**: React 19+, TypeScript 6+, Vite 8+ (build tool)
+- **Frontend**: React 19+ (standalone UMD scripts), TypeScript (compiled by bundled `tsc.js`)
+- **Build tooling**: No npm/node_modules. TypeScript is compiled by `node scripts/tsc.js`. React/ReactDOM are standalone JS files in `wwwroot/js/`. Only Node.js runtime is required.
 - **Interop**: Photino's JavaScript interop bridge (`window.external.sendMessage` for JS→C#, `window.external.receiveMessage` for C#→JS)
 - **Packaging**: .NET publish with `PublishSingleFile=true`, `SelfContained=true`, `GenerateEmbeddedFilesManifest=true`, `StaticWebAssetsEnabled=false`
 - **Resource Embedding**: `Microsoft.Extensions.FileProviders.Embedded` with `ManifestEmbeddedFileProvider` — wwwroot files are `EmbeddedResource` items, not `Content`
-- **Testing**: FsCheck + xUnit (C# backend), Vitest + fast-check (TypeScript frontend)
+- **Testing**: FsCheck + xUnit (C# backend)
+
+### Project Structure
+
+All frontend code lives inside the C# project — no separate `frontend/` directory:
+
+```
+src/EditorApp/
+├── EditorApp.csproj
+├── Program.cs
+├── App.razor
+├── _Imports.razor
+├── tsconfig.json              ← TypeScript config
+├── scripts/
+│   ├── tsc.js                 ← Bundled TypeScript compiler
+│   └── lib.*.d.ts             ← TypeScript lib definitions
+├── src/                       ← TSX source files
+│   ├── App.tsx
+│   ├── ContentArea.tsx
+│   ├── TitleBar.tsx
+│   ├── StatusBar.tsx
+│   └── InteropService.ts
+├── Models/
+├── Services/
+└── wwwroot/
+    ├── index.html
+    └── js/
+        ├── react.js           ← Standalone React UMD build
+        ├── react-dom.js       ← Standalone ReactDOM UMD build
+        ├── App.js             ← Compiled from src/App.tsx by tsc
+        ├── ContentArea.js
+        ├── TitleBar.js
+        ├── StatusBar.js
+        └── InteropService.js
+```
 
 ### Critical Implementation Details
 
@@ -37,19 +72,30 @@ These were discovered during implementation and must be followed:
    <EmbeddedResource Include="wwwroot\**" />
    ```
 
-3. **Message receiving uses `window.external.receiveMessage`**: Photino does NOT deliver C#→JS messages via the standard DOM `message` event. The frontend must use:
+3. **TypeScript compilation via .csproj target**: No npm needed. The .csproj runs `tsc.js` before build:
+   ```xml
+   <Target Name="CompileTypeScript" BeforeTargets="BeforeBuild">
+     <Exec Command="node scripts/tsc.js -p tsconfig.json" />
+   </Target>
+   ```
+
+4. **TSX files use `React.createElement`**: Since there's no JSX transform bundler, `tsconfig.json` must set `"jsx": "react"` so TSX compiles to `React.createElement(...)` calls. React is available as a global from the standalone script.
+
+5. **React components exposed via `window`**: Each component file exposes its component to `window` (e.g. `window.renderApp = ...`) so `index.html` can mount them. This is the same pattern used by HyprConfig.
+
+6. **Message receiving uses `window.external.receiveMessage`**: Photino does NOT deliver C#→JS messages via the standard DOM `message` event. The frontend must use:
    ```typescript
    window.external.receiveMessage((msg: string) => { /* handle JSON */ });
    ```
 
-4. **Skip non-JSON messages in MessageRouter**: Blazor sends internal messages (starting with `_`) through the same channel. Guard with:
+7. **Skip non-JSON messages in MessageRouter**: Blazor sends internal messages (starting with `_`) through the same channel. Guard with:
    ```csharp
    if (trimmed[0] != '{') return; // skip non-JSON
    ```
 
-5. **Single keyboard shortcut handler**: Handle Ctrl+O/Cmd+O in the React `keydown` listener only. Do NOT add a duplicate handler in `index.html` — it causes two native file dialogs.
+8. **Single keyboard shortcut handler**: Handle Ctrl+O/Cmd+O in the React `keydown` listener only. Do NOT add a duplicate handler in `index.html` — it causes two native file dialogs.
 
-6. **Single InteropService instance**: Create one instance in `useEffect`, register all callbacks on it, and use the same instance for `sendOpenFileRequest()`. Creating multiple instances causes responses to arrive on an instance with no callbacks registered.
+9. **Single InteropService instance**: Create one instance, register all callbacks on it, and use the same instance for `sendOpenFileRequest()`. Creating multiple instances causes responses to arrive on an instance with no callbacks registered.
 
 ## Architecture
 
@@ -124,9 +170,14 @@ editor-app (single executable)
 ├── Embedded Resources (via ManifestEmbeddedFileProvider)
 │   └── wwwroot/
 │       ├── index.html (host page with #app and #root divs, blazor.webview.js)
-│       └── assets/
-│           ├── index.js (Vite-built React bundle, stable filename)
-│           └── index.css (Vite-built styles, stable filename)
+│       └── js/
+│           ├── react.js       (standalone React UMD build)
+│           ├── react-dom.js   (standalone ReactDOM UMD build)
+│           ├── App.js         (compiled from src/App.tsx)
+│           ├── ContentArea.js
+│           ├── TitleBar.js
+│           ├── StatusBar.js
+│           └── InteropService.js
 ```
 
 **Key .csproj settings**:
@@ -138,7 +189,7 @@ editor-app (single executable)
 <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
 ```
 
-**Build pipeline**: The .csproj `BuildReactApp` target automatically runs `npm ci` + `npm run build` and copies `frontend/dist/assets/*` to `wwwroot/assets/` before every C# build. No manual steps needed — `dotnet build` or `dotnet run` handles everything.
+**Build pipeline**: The .csproj `CompileTypeScript` target runs `node scripts/tsc.js -p tsconfig.json` before every C# build. TSX files in `src/` are compiled to JS files in `wwwroot/js/`. No npm, no node_modules, no separate frontend project — just `dotnet build`.
 
 ## Components and Interfaces
 
@@ -357,21 +408,19 @@ interface InteropService {
 
 **Implementation**:
 ```typescript
-// IMPORTANT: Create a single instance per component lifecycle.
+// InteropService.ts — compiled by tsc to wwwroot/js/InteropService.js
+// No module imports — React is a global, types are ambient.
+
+// IMPORTANT: Create a single instance per app lifecycle.
 // Do NOT create multiple instances — callbacks are per-instance.
-const interop = createInteropService();
 
-// Sending (JS → C#):
-interop.sendOpenFileRequest();
-// Uses: window.external.sendMessage(JSON.stringify(envelope))
+function createInteropService() {
+  // ... registers window.external.receiveMessage(handler)
+  // ... exposes sendOpenFileRequest(), onFileLoaded(), onError(), onWarning(), dispose()
+}
 
-// Receiving (C# → JS):
-interop.onFileLoaded(callback);
-// Uses: window.external.receiveMessage(handler)
-// NOT window.addEventListener('message') — Photino uses its own API
-
-// Cleanup on unmount:
-interop.dispose();
+// Expose to window for use by App.js
+(window as any).createInteropService = createInteropService;
 ```
 
 ## Data Models

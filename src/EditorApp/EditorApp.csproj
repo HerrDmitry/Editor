@@ -30,13 +30,10 @@
     <EmbeddedResource Include="wwwroot\**" />
   </ItemGroup>
 
-  <!-- Build React frontend and copy assets to wwwroot before every C# build -->
-  <Target Name="BuildReactApp" BeforeTargets="BeforeBuild">
-    <Exec Command="npm ci --silent" WorkingDirectory="$(MSBuildProjectDirectory)/../../frontend" />
-    <Exec Command="npm run build" WorkingDirectory="$(MSBuildProjectDirectory)/../../frontend" />
-    <MakeDir Directories="$(MSBuildProjectDirectory)/wwwroot/assets" />
-    <Exec Command="cp -r $(MSBuildProjectDirectory)/../../frontend/dist/assets/* $(MSBuildProjectDirectory)/wwwroot/assets/" Condition="'$(OS)' != 'Windows_NT'" />
-    <Exec Command="xcopy /E /Y /I &quot;$(MSBuildProjectDirectory)\..\..\frontend\dist\assets\*&quot; &quot;$(MSBuildProjectDirectory)\wwwroot\assets\&quot;" Condition="'$(OS)' == 'Windows_NT'" />
+  <!-- Compile TypeScript to wwwroot/js before every C# build -->
+  <Target Name="CompileTypeScript" BeforeTargets="BeforeBuild">
+    <Message Importance="high" Text="Compiling TypeScript..." />
+    <Exec Command="node scripts/tsc.js -p tsconfig.json" WorkingDirectory="$(MSBuildProjectDirectory)" />
   </Target>
 
 </Project>

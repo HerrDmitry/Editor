@@ -5,12 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
     <title>Editor</title>
-    <link rel="stylesheet" href="assets/index.css" />
+    <link rel="stylesheet" href="css/app.css" />
 </head>
 <body>
     <div id="app"></div>
     <div id="root"></div>
-    <script src="assets/index.js" type="module"></script>
+
+    <!-- React runtime (UMD globals) -->
+    <script src="js/react.js"></script>
+    <script src="js/react-dom.js"></script>
+
+    <!-- Application scripts (order matters: dependencies first) -->
+    <script src="js/InteropService.js"></script>
+    <script src="js/StatusBar.js"></script>
+    <script src="js/TitleBar.js"></script>
+    <script src="js/ContentArea.js"></script>
+    <script src="js/App.js"></script>
+
+    <!-- Blazor interop for Photino -->
     <script src="_framework/blazor.webview.js"></script>
 </body>
 </html>

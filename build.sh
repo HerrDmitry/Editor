@@ -10,14 +10,12 @@
 #
 # Prerequisites:
 #   - .NET 10 SDK
-#   - Node.js and npm
+#   - Node.js (for TypeScript compilation via tsc.js)
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
 CSPROJ_DIR="$SCRIPT_DIR/src/EditorApp"
-WWWROOT_DIR="$CSPROJ_DIR/wwwroot"
 OUTPUT_DIR="$SCRIPT_DIR/publish"
 
 ALL_RIDS=("win-x64" "osx-x64" "linux-x64")
@@ -33,27 +31,10 @@ echo "==> EditorApp build script"
 echo "    Targets: ${RIDS[*]}"
 echo ""
 
-# ── Step 1: Build the React frontend ────────────────────────────────────────
-echo "==> Step 1: Building React frontend..."
-(
-  cd "$FRONTEND_DIR"
-  npm ci --silent
-  npm run build
-)
-echo "    React build complete: $FRONTEND_DIR/dist/"
-echo ""
-
-# ── Step 2: Copy React bundle into C# wwwroot ──────────────────────────────
-echo "==> Step 2: Copying React bundle to wwwroot..."
-mkdir -p "$WWWROOT_DIR/assets"
-cp -r "$FRONTEND_DIR/dist/assets/"* "$WWWROOT_DIR/assets/"
-# Copy the Vite-generated index.html as a reference (App.razor is the actual host page)
-cp "$FRONTEND_DIR/dist/index.html" "$WWWROOT_DIR/index.html"
-echo "    Copied to $WWWROOT_DIR"
-echo ""
-
-# ── Step 3: Publish C# application for each target platform ────────────────
-echo "==> Step 3: Publishing .NET application..."
+# ── Step 1: Publish .NET application for each target platform ───────────────
+# TypeScript compilation runs automatically via the CompileTypeScript MSBuild
+# target in EditorApp.csproj (node scripts/tsc.js -p tsconfig.json).
+echo "==> Step 1: Publishing .NET application..."
 mkdir -p "$OUTPUT_DIR"
 
 for rid in "${RIDS[@]}"; do
@@ -69,8 +50,8 @@ for rid in "${RIDS[@]}"; do
 done
 echo ""
 
-# ── Step 4: Package executables ─────────────────────────────────────────────
-echo "==> Step 4: Packaging executables..."
+# ── Step 2: Package executables ─────────────────────────────────────────────
+echo "==> Step 2: Packaging executables..."
 PACKAGE_DIR="$OUTPUT_DIR/packages"
 mkdir -p "$PACKAGE_DIR"
 

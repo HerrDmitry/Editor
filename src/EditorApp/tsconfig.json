@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "jsx": "react",
+    "outDir": "wwwroot/js",
+    "rootDir": "src",
+    "module": "none",
+    "target": "es2020",
+    "strict": true,
+    "lib": ["es2020", "dom"],
+    "skipLibCheck": true,
+    "typeRoots": ["./scripts"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "files": ["scripts/react.d.ts", "scripts/react-dom.d.ts"]
+}

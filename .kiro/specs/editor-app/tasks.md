@@ -18,6 +18,7 @@ The implementation is split into 8 phases, each in its own file:
 6. **[tasks/06-error-handling.md](./tasks/06-error-handling.md)** - Error handling and large file validation
 7. **[tasks/07-integration.md](./tasks/07-integration.md)** - Integration, end-to-end testing, cross-platform validation
 8. **[tasks/08-build-packaging.md](./tasks/08-build-packaging.md)** - Build configuration and packaging scripts
+9. **[tasks/09-migrate-to-tsc.md](./tasks/09-migrate-to-tsc.md)** - Migrate frontend from Vite/npm to bundled tsc (no npm dependency)
 
 See **[tasks/README.md](./tasks/README.md)** for detailed information about the task organization, implementation approach, and property-based testing strategy.
 
