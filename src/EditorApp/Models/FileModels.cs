@@ -6,11 +6,11 @@ namespace EditorApp.Models;
 public record FileOpenResult(bool Success, string? FilePath, string? ErrorMessage);
 
 /// <summary>
-/// Metadata about a file including size, line count, encoding, and last modified date.
+/// Metadata returned when a file is opened for streamed reading.
 /// </summary>
-public record FileMetadata(long FileSizeBytes, int LineCount, string Encoding, DateTime LastModified);
+public record FileOpenMetadata(string FilePath, string FileName, int TotalLines, long FileSizeBytes, string Encoding);
 
 /// <summary>
-/// Represents the full content and metadata of a loaded file.
+/// Result of reading a range of lines from a file.
 /// </summary>
-public record FileContent(string Content, string FilePath, string FileName, FileMetadata Metadata);
+public record LinesResult(int StartLine, string[] Lines, int TotalLines);

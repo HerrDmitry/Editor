@@ -25,39 +25,48 @@ public class OpenFileRequest : IMessage
 }
 
 /// <summary>
-/// Payload sent to the frontend when a file is successfully loaded.
+/// Request from the frontend for a range of lines from the currently open file.
 /// </summary>
-public class FileLoadedResponse : IMessage
+public class RequestLinesMessage : IMessage
 {
-    [JsonPropertyName("content")]
-    public string Content { get; set; } = string.Empty;
-
-    [JsonPropertyName("filePath")]
-    public string FilePath { get; set; } = string.Empty;
-
-    [JsonPropertyName("fileName")]
-    public string FileName { get; set; } = string.Empty;
-
-    [JsonPropertyName("metadata")]
-    public FileMetadataPayload Metadata { get; set; } = new();
-}
-
-/// <summary>
-/// JSON-friendly metadata payload for interop messages.
-/// </summary>
-public class FileMetadataPayload
-{
-    [JsonPropertyName("fileSizeBytes")]
-    public long FileSizeBytes { get; set; }
+    [JsonPropertyName("startLine")]
+    public int StartLine { get; set; }
 
     [JsonPropertyName("lineCount")]
     public int LineCount { get; set; }
+}
+
+/// <summary>
+/// Sent to the frontend when a file is opened — metadata only, no content.
+/// </summary>
+public class FileOpenedResponse : IMessage
+{
+    [JsonPropertyName("fileName")]
+    public string FileName { get; set; } = string.Empty;
+
+    [JsonPropertyName("totalLines")]
+    public int TotalLines { get; set; }
+
+    [JsonPropertyName("fileSizeBytes")]
+    public long FileSizeBytes { get; set; }
 
     [JsonPropertyName("encoding")]
     public string Encoding { get; set; } = string.Empty;
+}
 
-    [JsonPropertyName("lastModified")]
-    public string LastModified { get; set; } = string.Empty;
+/// <summary>
+/// Sent to the frontend with the requested range of lines.
+/// </summary>
+public class LinesResponse : IMessage
+{
+    [JsonPropertyName("startLine")]
+    public int StartLine { get; set; }
+
+    [JsonPropertyName("lines")]
+    public string[] Lines { get; set; } = Array.Empty<string>();
+
+    [JsonPropertyName("totalLines")]
+    public int TotalLines { get; set; }
 }
 
 /// <summary>
@@ -73,22 +82,4 @@ public class ErrorResponse : IMessage
 
     [JsonPropertyName("details")]
     public string? Details { get; set; }
-}
-
-/// <summary>
-/// Payload sent to the frontend as a warning (e.g., large file).
-/// </summary>
-public class WarningResponse : IMessage
-{
-    [JsonPropertyName("warningCode")]
-    public string WarningCode { get; set; } = string.Empty;
-
-    [JsonPropertyName("message")]
-    public string Message { get; set; } = string.Empty;
-
-    [JsonPropertyName("filePath")]
-    public string FilePath { get; set; } = string.Empty;
-
-    [JsonPropertyName("fileSizeBytes")]
-    public long FileSizeBytes { get; set; }
 }

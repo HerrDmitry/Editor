@@ -89,9 +89,13 @@ declare namespace React {
     altKey: boolean;
   }
 
+  interface UIEvent<T = Element> extends SyntheticEvent<T> {
+  }
+
   // HTML attributes
   interface HTMLAttributes<T> {
     key?: Key;
+    ref?: Ref<T>;
     className?: string;
     id?: string;
     style?: CSSProperties;
@@ -100,6 +104,7 @@ declare namespace React {
     onClick?: (event: MouseEvent<T>) => void;
     onKeyDown?: (event: KeyboardEvent<T>) => void;
     onChange?: (event: ChangeEvent<T>) => void;
+    onScroll?: (event: UIEvent<T>) => void;
     children?: ReactNode;
     'aria-label'?: string;
     'aria-hidden'?: boolean | 'true' | 'false';

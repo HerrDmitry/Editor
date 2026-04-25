@@ -5,60 +5,60 @@ Replace the current whole-file-into-memory approach with streamed reading using 
 
 ## Tasks
 
-- [ ] 1. Update backend data models and message types
-  - [ ] 1.1 Add new data models
+- [x] 1. Update backend data models and message types
+  - [x] 1.1 Add new data models
     - Add `FileOpenMetadata` record: FilePath, FileName, TotalLines, FileSizeBytes, Encoding
     - Add `LinesResult` record: StartLine, Lines (string[]), TotalLines
     - Add `RequestLinesMessage` class (implements IMessage): StartLine, LineCount
     - Add `FileOpenedResponse` class (implements IMessage): FileName, TotalLines, FileSizeBytes, Encoding
     - Add `LinesResponse` class (implements IMessage): StartLine, Lines (string[]), TotalLines
-  - [ ] 1.2 Remove obsolete models
+  - [x] 1.2 Remove obsolete models
     - Remove `FileLoadedResponse` (replaced by FileOpenedResponse + LinesResponse)
     - Remove `WarningResponse` (no more file size warnings)
     - Remove `FileContent` record (no longer loading full file)
     - Remove `FILE_TOO_LARGE` from ErrorCode enum
 
-- [ ] 2. Rewrite FileService for streamed reading
-  - [ ] 2.1 Implement OpenFileAsync with line offset index
+- [x] 2. Rewrite FileService for streamed reading
+  - [x] 2.1 Implement OpenFileAsync with line offset index
     - Scan the file from start to end, recording byte offset of each line start into a `List<long>`
     - Count total lines during the scan
     - Detect encoding via BOM detection (fallback to UTF-8)
     - Store the line index in a dictionary keyed by file path (for later ReadLinesAsync calls)
     - Return FileOpenMetadata (totalLines, fileSize, encoding, fileName)
     - Remove ValidateFileSize method and the 10MB/50MB limits
-  - [ ] 2.2 Implement ReadLinesAsync
+  - [x] 2.2 Implement ReadLinesAsync
     - Look up byte offset for startLine in the line offset index
     - Open a FileStream and seek to that offset
     - Read lineCount lines using a StreamReader
     - Clamp lineCount to not exceed totalLines - startLine
     - Return LinesResult (startLine, lines array, totalLines)
-  - [ ] 2.3 Remove old ReadFileAsync and GetFileMetadataAsync methods
+  - [x] 2.3 Remove old ReadFileAsync and GetFileMetadataAsync methods
     - These loaded the entire file into memory — no longer needed
 
-- [ ] 3. Update PhotinoHostService message handlers
-  - [ ] 3.1 Update HandleOpenFileRequestAsync
+- [x] 3. Update PhotinoHostService message handlers
+  - [x] 3.1 Update HandleOpenFileRequestAsync
     - After file picker selection, call FileService.OpenFileAsync (not ReadFileAsync)
     - Send FileOpenedResponse (metadata only) instead of FileLoadedResponse
     - Remove the WarningResponse for large files
     - Remove the file size validation check
-  - [ ] 3.2 Add HandleRequestLinesAsync
+  - [x] 3.2 Add HandleRequestLinesAsync
     - Register handler for RequestLinesMessage
     - Call FileService.ReadLinesAsync with the requested startLine and lineCount
     - Send LinesResponse back to the UI
     - Handle errors (file not found, seek errors) and send ErrorResponse
 
-- [ ] 4. Update frontend InteropService
-  - [ ] 4.1 Add new message types and methods
+- [x] 4. Update frontend InteropService
+  - [x] 4.1 Add new message types and methods
     - Add `sendRequestLines(startLine, lineCount)` method
     - Add `onFileOpened(callback)` handler (for FileOpenedResponse)
     - Add `onLinesResponse(callback)` handler (for LinesResponse)
     - Update MessageTypes constants: add FileOpenedResponse, RequestLinesMessage, LinesResponse
-  - [ ] 4.2 Remove obsolete handlers
+  - [x] 4.2 Remove obsolete handlers
     - Remove `onFileLoaded` (replaced by onFileOpened + onLinesResponse)
     - Remove `onWarning` (no more file size warnings)
 
-- [ ] 5. Update frontend components for virtual scrolling
-  - [ ] 5.1 Update App.tsx state management
+- [x] 5. Update frontend components for virtual scrolling
+  - [x] 5.1 Update App.tsx state management
     - Replace `fileContent` state with `fileMeta` (FileMeta | null)
     - Add `lines` state (string[] | null) for currently visible lines
     - Add `linesStartLine` state (number) for the start line of the current buffer
@@ -66,7 +66,7 @@ Replace the current whole-file-into-memory approach with streamed reading using 
     - Wire up onFileOpened → set fileMeta, request initial lines
     - Wire up onLinesResponse → set lines and linesStartLine
     - Add handleRequestLines callback that calls interop.sendRequestLines
-  - [ ] 5.2 Rewrite ContentArea.tsx with virtual scrolling
+  - [x] 5.2 Rewrite ContentArea.tsx with virtual scrolling
     - Add `onRequestLines` prop: (startLine: number, lineCount: number) => void
     - Add `fileMeta` prop (for totalLines)
     - Add `linesStartLine` prop (for positioning visible lines)
@@ -80,14 +80,14 @@ Replace the current whole-file-into-memory approach with streamed reading using 
       - Call onRequestLines when visible range changes
     - Line numbers: display linesStartLine + index + 1 (1-based)
     - Use a fixed lineHeight constant (e.g. 20px) for consistent calculations
-  - [ ] 5.3 Update StatusBar.tsx
+  - [x] 5.3 Update StatusBar.tsx
     - Accept FileMeta instead of FileMetadata
     - Display totalLines, fileSizeBytes, encoding from FileMeta
-  - [ ] 5.4 Update index.html and CSS
+  - [x] 5.4 Update index.html and CSS
     - Update CSS for virtual scroll container styles
     - Ensure fixed line height in CSS matches the JS constant
 
-- [ ] 6. Verify the migration
+- [x] 6. Verify the migration
   - Run `dotnet build` and verify TypeScript compiles without errors
   - Run the app and verify:
     - Small files open and display correctly

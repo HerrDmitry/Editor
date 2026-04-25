@@ -17,6 +17,11 @@ public class PhotinoHostService
     private readonly IMessageRouter _messageRouter;
     private readonly IFileService _fileService;
 
+    /// <summary>
+    /// Path of the currently open file, used by HandleRequestLinesAsync.
+    /// </summary>
+    private string? _currentFilePath;
+
     public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService)
     {
         _app = app ?? throw new ArgumentNullException(nameof(app));
@@ -64,11 +69,12 @@ public class PhotinoHostService
     private void RegisterMessageHandlers()
     {
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
+        _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
     }
 
     /// <summary>
     /// Handle an <see cref="OpenFileRequest"/> from the React frontend:
-    /// show the native file picker, read the file, and send the result back.
+    /// show the native file picker, scan the file, and send metadata back.
     /// </summary>
     private async Task HandleOpenFileRequestAsync(OpenFileRequest request)
     {
@@ -85,36 +91,19 @@ public class PhotinoHostService
 
             var filePath = selectedFiles[0];
 
-            // Validate file size and send warning if needed
-            var fileInfo = new FileInfo(filePath);
-            if (_fileService.ValidateFileSize(fileInfo.Length, out var warningMessage) && warningMessage is not null)
-            {
-                // File is between 10–50 MB — send a warning first, then continue loading.
-                await _messageRouter.SendToUIAsync(new WarningResponse
-                {
-                    WarningCode = "LARGE_FILE",
-                    Message = warningMessage,
-                    FilePath = filePath,
-                    FileSizeBytes = fileInfo.Length
-                });
-            }
+            // Scan the file to build line offset index and get metadata
+            var metadata = await _fileService.OpenFileAsync(filePath);
 
-            // Read the file
-            var fileContent = await _fileService.ReadFileAsync(filePath);
+            // Store current file path for subsequent ReadLinesAsync calls
+            _currentFilePath = filePath;
 
-            // Send loaded content to the UI
-            await _messageRouter.SendToUIAsync(new FileLoadedResponse
+            // Send metadata to the UI (no file content)
+            await _messageRouter.SendToUIAsync(new FileOpenedResponse
             {
-                Content = fileContent.Content,
-                FilePath = fileContent.FilePath,
-                FileName = fileContent.FileName,
-                Metadata = new FileMetadataPayload
-                {
-                    FileSizeBytes = fileContent.Metadata.FileSizeBytes,
-                    LineCount = fileContent.Metadata.LineCount,
-                    Encoding = fileContent.Metadata.Encoding,
-                    LastModified = fileContent.Metadata.LastModified.ToString("o")
-                }
+                FileName = metadata.FileName,
+                TotalLines = metadata.TotalLines,
+                FileSizeBytes = metadata.FileSizeBytes,
+                Encoding = metadata.Encoding
             });
         }
         catch (FileNotFoundException ex)
@@ -136,15 +125,6 @@ public class PhotinoHostService
                 Message = "You do not have permission to read this file."
             });
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("exceeds maximum size"))
-        {
-            Console.Error.WriteLine($"[ERROR] File too large\n{ex}");
-            await _messageRouter.SendToUIAsync(new ErrorResponse
-            {
-                ErrorCode = Models.ErrorCode.FILE_TOO_LARGE.ToString(),
-                Message = "This file is too large to open (maximum 50 MB)."
-            });
-        }
         catch (System.Text.Json.JsonException ex)
         {
             Console.Error.WriteLine($"[ERROR] JSON serialization failure\n{ex}");
@@ -158,6 +138,55 @@ public class PhotinoHostService
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[ERROR] Unexpected error\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                Message = "An unexpected error occurred while opening the file.",
+                Details = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Handle a <see cref="RequestLinesMessage"/> from the React frontend:
+    /// read the requested line range and send it back.
+    /// </summary>
+    private async Task HandleRequestLinesAsync(RequestLinesMessage request)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_currentFilePath))
+            {
+                await _messageRouter.SendToUIAsync(new ErrorResponse
+                {
+                    ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                    Message = "No file is currently open."
+                });
+                return;
+            }
+
+            var result = await _fileService.ReadLinesAsync(_currentFilePath, request.StartLine, request.LineCount);
+
+            await _messageRouter.SendToUIAsync(new LinesResponse
+            {
+                StartLine = result.StartLine,
+                Lines = result.Lines,
+                TotalLines = result.TotalLines
+            });
+        }
+        catch (FileNotFoundException ex)
+        {
+            Console.Error.WriteLine($"[ERROR] File not found during line read: {ex.FileName}\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.FILE_NOT_FOUND.ToString(),
+                Message = "The file could not be found. It may have been moved or deleted.",
+                Details = ex.FileName
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Error reading lines\n{ex}");
             await _messageRouter.SendToUIAsync(new ErrorResponse
             {
                 ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),

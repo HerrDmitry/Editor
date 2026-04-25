@@ -8,20 +8,19 @@
  */
 const INTEROP_TIMEOUT_MS = 5_000;
 
-/** Metadata about a loaded file. */
-interface FileMetadata {
+/** Metadata about an opened file (from FileOpenedResponse). */
+interface FileMeta {
+  fileName: string;
+  totalLines: number;
   fileSizeBytes: number;
-  lineCount: number;
   encoding: string;
-  lastModified: string;
 }
 
-/** Full content and metadata of a loaded file. */
-interface FileContent {
-  content: string;
-  filePath: string;
-  fileName: string;
-  metadata: FileMetadata;
+/** Payload from a LinesResponse message. */
+interface LinesResponsePayload {
+  startLine: number;
+  lines: string[];
+  totalLines: number;
 }
 
 /** Error information sent from the backend. */
@@ -29,14 +28,6 @@ interface ErrorInfo {
   errorCode: string;
   message: string;
   details?: string;
-}
-
-/** Warning information sent from the backend (e.g. large file). */
-interface WarningInfo {
-  warningCode: string;
-  message: string;
-  filePath: string;
-  fileSizeBytes: number;
 }
 
 /** Common envelope for all messages exchanged between backend and frontend. */
@@ -49,9 +40,10 @@ interface MessageEnvelope {
 /** Constants for message types used in the interop protocol. */
 const MessageTypes = {
   OpenFileRequest: 'OpenFileRequest',
-  FileLoadedResponse: 'FileLoadedResponse',
+  RequestLinesMessage: 'RequestLinesMessage',
+  FileOpenedResponse: 'FileOpenedResponse',
+  LinesResponse: 'LinesResponse',
   ErrorResponse: 'ErrorResponse',
-  WarningResponse: 'WarningResponse',
 } as const;
 
 /**
@@ -60,9 +52,10 @@ const MessageTypes = {
  */
 interface InteropService {
   sendOpenFileRequest(): void;
-  onFileLoaded(callback: (data: FileContent) => void): void;
+  sendRequestLines(startLine: number, lineCount: number): void;
+  onFileOpened(callback: (data: FileMeta) => void): void;
+  onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
   onError(callback: (error: ErrorInfo) => void): void;
-  onWarning(callback: (warning: WarningInfo) => void): void;
   dispose(): void;
 }
 
@@ -74,9 +67,9 @@ interface InteropService {
  * the type field of the MessageEnvelope.
  */
 function createInteropService(): InteropService {
-  const fileLoadedCallbacks: Array<(data: FileContent) => void> = [];
+  const fileOpenedCallbacks: Array<(data: FileMeta) => void> = [];
+  const linesResponseCallbacks: Array<(data: LinesResponsePayload) => void> = [];
   const errorCallbacks: Array<(error: ErrorInfo) => void> = [];
-  const warningCallbacks: Array<(warning: WarningInfo) => void> = [];
 
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
@@ -97,21 +90,21 @@ function createInteropService(): InteropService {
     clearPendingTimeout();
 
     switch (envelope.type) {
-      case MessageTypes.FileLoadedResponse:
-        for (const cb of fileLoadedCallbacks) {
-          cb(envelope.payload as FileContent);
+      case MessageTypes.FileOpenedResponse:
+        for (const cb of fileOpenedCallbacks) {
+          cb(envelope.payload as FileMeta);
+        }
+        break;
+
+      case MessageTypes.LinesResponse:
+        for (const cb of linesResponseCallbacks) {
+          cb(envelope.payload as LinesResponsePayload);
         }
         break;
 
       case MessageTypes.ErrorResponse:
         for (const cb of errorCallbacks) {
           cb(envelope.payload as ErrorInfo);
-        }
-        break;
-
-      case MessageTypes.WarningResponse:
-        for (const cb of warningCallbacks) {
-          cb(envelope.payload as WarningInfo);
         }
         break;
 
@@ -182,24 +175,44 @@ function createInteropService(): InteropService {
       }
     },
 
-    onFileLoaded(callback: (data: FileContent) => void): void {
-      fileLoadedCallbacks.push(callback);
+    sendRequestLines(startLine: number, lineCount: number): void {
+      const envelope: MessageEnvelope = {
+        type: MessageTypes.RequestLinesMessage,
+        payload: { startLine, lineCount },
+        timestamp: new Date().toISOString(),
+      };
+
+      try {
+        (window as any).external.sendMessage(JSON.stringify(envelope));
+      } catch {
+        const interopError: ErrorInfo = {
+          errorCode: 'INTEROP_FAILURE',
+          message: 'The application is not responding. Please restart.',
+        };
+        for (const cb of errorCallbacks) {
+          cb(interopError);
+        }
+      }
+    },
+
+    onFileOpened(callback: (data: FileMeta) => void): void {
+      fileOpenedCallbacks.push(callback);
+    },
+
+    onLinesResponse(callback: (data: LinesResponsePayload) => void): void {
+      linesResponseCallbacks.push(callback);
     },
 
     onError(callback: (error: ErrorInfo) => void): void {
       errorCallbacks.push(callback);
     },
 
-    onWarning(callback: (warning: WarningInfo) => void): void {
-      warningCallbacks.push(callback);
-    },
-
     dispose(): void {
       clearPendingTimeout();
       window.removeEventListener('message', handleDomMessage);
-      fileLoadedCallbacks.length = 0;
+      fileOpenedCallbacks.length = 0;
+      linesResponseCallbacks.length = 0;
       errorCallbacks.length = 0;
-      warningCallbacks.length = 0;
     },
   };
 }

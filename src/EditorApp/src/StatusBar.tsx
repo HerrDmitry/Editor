@@ -1,15 +1,14 @@
 // StatusBar.tsx — compiled by tsc to wwwroot/js/StatusBar.js
 // No module imports — React is a global from the UMD script.
 
-interface FileMetadata {
+interface FileMeta {
+  totalLines: number;
   fileSizeBytes: number;
-  lineCount: number;
   encoding: string;
-  lastModified: string;
 }
 
 interface StatusBarProps {
-  metadata: FileMetadata | null | undefined;
+  metadata: FileMeta | null | undefined;
 }
 
 /**
@@ -36,7 +35,7 @@ function StatusBar({ metadata }: StatusBarProps) {
         <div className="status-bar__items">
           <span className="status-bar__item">{formatFileSize(metadata.fileSizeBytes)}</span>
           <span className="status-bar__separator" aria-hidden="true">|</span>
-          <span className="status-bar__item">{metadata.lineCount} lines</span>
+          <span className="status-bar__item">{metadata.totalLines} lines</span>
           <span className="status-bar__separator" aria-hidden="true">|</span>
           <span className="status-bar__item">{metadata.encoding}</span>
         </div>
