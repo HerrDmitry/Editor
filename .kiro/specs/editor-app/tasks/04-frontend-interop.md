@@ -5,14 +5,14 @@ Implement TypeScript interfaces and the InteropService for frontend-backend comm
 
 ## Tasks
 
-- [ ] 5. Implement frontend data models and interop service
-  - [ ] 5.1 Create TypeScript interfaces and types
+- [x] 5. Implement frontend data models and interop service
+  - [x] 5.1 Create TypeScript interfaces and types
     - Define `FileContent`, `FileMetadata`, `ErrorInfo`, `WarningInfo` interfaces
     - Define `MessageEnvelope` interface matching backend schema
     - Define message type constants
     - _Requirements: 7.1_
 
-  - [ ] 5.2 Implement InteropService for frontend-backend communication
+  - [x] 5.2 Implement InteropService for frontend-backend communication
     - Implement `sendOpenFileRequest()` using `window.external.sendMessage`
     - Implement `onFileLoaded(callback)` to listen for FileLoadedResponse messages
     - Implement `onError(callback)` to listen for ErrorResponse messages

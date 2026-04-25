@@ -2,7 +2,17 @@
 
 ## Introduction
 
-A cross-platform desktop editor application built with C# .NET 10 and Photino.Blazor for the native window host, with React/TypeScript as the UI layer. The application is compiled into a single self-contained executable that embeds all resources. This initial version focuses on read-only file viewing — opening and displaying file contents without editing capabilities.
+A cross-platform desktop editor application built with C# .NET 10 and Photino.Blazor for the native window host, with React/TypeScript as the UI layer. The application is compiled into a single self-contained executable that embeds all resources using .NET's `ManifestEmbeddedFileProvider`. This initial version focuses on read-only file viewing — opening and displaying file contents without editing capabilities.
+
+### Implementation Notes
+
+- **Photino.Blazor version**: 4.0.13 (not 3.x — older versions have incompatible APIs)
+- **Resource embedding**: All `wwwroot/` files are embedded as `EmbeddedResource` items (not `Content`). The .csproj must set `GenerateEmbeddedFilesManifest=true`, `StaticWebAssetsEnabled=false`, and use `ManifestEmbeddedFileProvider` at runtime. This eliminates the need for a physical `wwwroot/` directory at runtime.
+- **Interop direction**: Frontend → Backend uses `window.external.sendMessage(json)`. Backend → Frontend uses `window.external.receiveMessage(callback)` (NOT `window.addEventListener('message')`).
+- **Keyboard shortcuts**: Must be handled in exactly one place (React `keydown` listener) to avoid duplicate native file dialogs. Do NOT add a second handler in `index.html`.
+- **Non-JSON messages**: The Blazor framework sends internal messages (e.g. starting with `_blazor`) through the same web message channel. The MessageRouter must skip messages that don't start with `{`.
+- **Frontend build integration**: The .csproj `BuildReactApp` target runs `npm ci` and `npm run build` before every C# build, then copies `frontend/dist/assets/*` into `wwwroot/assets/`. No manual copy step needed.
+- **Single InteropService instance**: The React App component must create one `InteropService` in `useEffect` and use that same instance for both sending requests and receiving responses. Creating separate instances causes callbacks to be registered on a different instance than the one receiving messages.
 
 ## Glossary
 

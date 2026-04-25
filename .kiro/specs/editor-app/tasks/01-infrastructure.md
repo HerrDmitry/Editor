@@ -5,7 +5,7 @@ Set up the project structure, dependencies, and build configuration for the cros
 
 ## Tasks
 
-- [ ] 1. Set up project structure and infrastructure
+- [x] 1. Set up project structure and infrastructure
   - Create C# .NET 10 solution with Photino.Blazor project
   - Create React/TypeScript frontend project with Vite
   - Configure single-file publishing (`PublishSingleFile=true`, `SelfContained=true`)

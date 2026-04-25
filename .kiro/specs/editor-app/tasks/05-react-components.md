@@ -5,8 +5,8 @@ Implement the React components for the user interface including App, TitleBar, C
 
 ## Tasks
 
-- [ ] 6. Implement React UI components
-  - [ ] 6.1 Implement App component (root component)
+- [x] 6. Implement React UI components
+  - [x] 6.1 Implement App component (root component)
     - Create state management for `fileContent`, `isLoading`, `error`, `titleBarText`
     - Implement layout structure: TitleBar, ContentArea, StatusBar
     - Connect InteropService callbacks to state updates
@@ -30,7 +30,7 @@ Implement the React components for the user interface including App, TitleBar, C
     - Test file loaded state display
     - _Requirements: 1.2, 6.2_
 
-  - [ ] 6.4 Implement TitleBar component
+  - [x] 6.4 Implement TitleBar component
     - Accept `title` prop
     - Display "Editor" when no file is open
     - Display "{fileName} - Editor" when file is loaded
@@ -47,7 +47,7 @@ Implement the React components for the user interface including App, TitleBar, C
     - Test file loaded title display (Requirement 4.2)
     - _Requirements: 4.1, 4.2_
 
-  - [ ] 6.7 Implement ContentArea component
+  - [x] 6.7 Implement ContentArea component
     - Accept `fileContent`, `isLoading`, `error` props
     - Implement empty state: display "Press Ctrl+O to open a file" prompt
     - Implement loading state: display spinner with "Loading file..." message
@@ -75,7 +75,7 @@ Implement the React components for the user interface including App, TitleBar, C
     - Test whitespace preservation (Requirement 3.6)
     - _Requirements: 1.2, 3.3, 3.4, 3.5, 3.6, 6.2_
 
-  - [ ] 6.10 Implement StatusBar component
+  - [x] 6.10 Implement StatusBar component
     - Accept `metadata` prop (FileMetadata or null)
     - Display empty state when no file is open
     - Display file size in human-readable format (bytes, KB, MB)
@@ -99,5 +99,5 @@ Implement the React components for the user interface including App, TitleBar, C
     - Test encoding display
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 7. Checkpoint - Ensure frontend components render and tests pass
+- [x] 7. Checkpoint - Ensure frontend components render and tests pass
   - Ensure all tests pass, ask the user if questions arise.

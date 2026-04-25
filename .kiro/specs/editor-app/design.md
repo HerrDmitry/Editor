@@ -14,10 +14,42 @@ The Editor App is a cross-platform desktop application for read-only file viewin
 
 ### Technology Stack
 
-- **Backend**: C# .NET 10, Photino.NET, Photino.Blazor
-- **Frontend**: React 18+, TypeScript 5+, Vite (build tool)
-- **Interop**: Photino's JavaScript interop bridge (`window.external.sendMessage` / `ReceiveMessage`)
-- **Packaging**: .NET publish with `PublishSingleFile=true` and `SelfContained=true`
+- **Backend**: C# .NET 10, Photino.NET, Photino.Blazor 4.0.13
+- **Frontend**: React 19+, TypeScript 6+, Vite 8+ (build tool)
+- **Interop**: Photino's JavaScript interop bridge (`window.external.sendMessage` for JS→C#, `window.external.receiveMessage` for C#→JS)
+- **Packaging**: .NET publish with `PublishSingleFile=true`, `SelfContained=true`, `GenerateEmbeddedFilesManifest=true`, `StaticWebAssetsEnabled=false`
+- **Resource Embedding**: `Microsoft.Extensions.FileProviders.Embedded` with `ManifestEmbeddedFileProvider` — wwwroot files are `EmbeddedResource` items, not `Content`
+- **Testing**: FsCheck + xUnit (C# backend), Vitest + fast-check (TypeScript frontend)
+
+### Critical Implementation Details
+
+These were discovered during implementation and must be followed:
+
+1. **Photino.Blazor requires `ManifestEmbeddedFileProvider`**: The default `PhysicalFileProvider` looks for a physical `wwwroot/` directory at runtime, which breaks single-file deployment. Register `ManifestEmbeddedFileProvider` in `Program.cs`:
+   ```csharp
+   builder.Services.AddSingleton<IFileProvider>(
+       new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot"));
+   ```
+
+2. **wwwroot must be EmbeddedResource, not Content**: In the .csproj:
+   ```xml
+   <Content Remove="wwwroot\**" />
+   <EmbeddedResource Include="wwwroot\**" />
+   ```
+
+3. **Message receiving uses `window.external.receiveMessage`**: Photino does NOT deliver C#→JS messages via the standard DOM `message` event. The frontend must use:
+   ```typescript
+   window.external.receiveMessage((msg: string) => { /* handle JSON */ });
+   ```
+
+4. **Skip non-JSON messages in MessageRouter**: Blazor sends internal messages (starting with `_`) through the same channel. Guard with:
+   ```csharp
+   if (trimmed[0] != '{') return; // skip non-JSON
+   ```
+
+5. **Single keyboard shortcut handler**: Handle Ctrl+O/Cmd+O in the React `keydown` listener only. Do NOT add a duplicate handler in `index.html` — it causes two native file dialogs.
+
+6. **Single InteropService instance**: Create one instance in `useEffect`, register all callbacks on it, and use the same instance for `sendOpenFileRequest()`. Creating multiple instances causes responses to arrive on an instance with no callbacks registered.
 
 ## Architecture
 
@@ -82,20 +114,31 @@ The application follows a **two-tier architecture** with clear separation betwee
 
 ### Deployment Architecture
 
-The application is packaged as a single executable using .NET's single-file publishing:
+The application is packaged as a single executable using .NET's single-file publishing with embedded resources:
 
 ```
-editor-app.exe (or editor-app on Unix)
-├── .NET Runtime (embedded)
+editor-app (single executable)
+├── .NET Runtime (embedded, self-contained)
 ├── C# Application Code
 ├── Photino.NET Native Libraries
-├── Embedded Resources
-│   ├── index.html (Blazor host page)
+├── Embedded Resources (via ManifestEmbeddedFileProvider)
 │   └── wwwroot/
-│       ├── assets/ (React bundle)
-│       ├── index.js
-│       └── index.css
+│       ├── index.html (host page with #app and #root divs, blazor.webview.js)
+│       └── assets/
+│           ├── index.js (Vite-built React bundle, stable filename)
+│           └── index.css (Vite-built styles, stable filename)
 ```
+
+**Key .csproj settings**:
+```xml
+<PublishSingleFile>true</PublishSingleFile>
+<SelfContained>true</SelfContained>
+<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+<GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+<StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+```
+
+**Build pipeline**: The .csproj `BuildReactApp` target automatically runs `npm ci` + `npm run build` and copies `frontend/dist/assets/*` to `wwwroot/assets/` before every C# build. No manual steps needed — `dotnet build` or `dotnet run` handles everything.
 
 ## Components and Interfaces
 
@@ -176,8 +219,9 @@ public interface IMessageRouter
 ```
 
 **Message Flow**:
-- Incoming: `window.external.sendMessage(json)` → C# `ReceiveMessage` handler → Deserialize → Route to handler
-- Outgoing: C# handler → Serialize → `SendWebMessage(json)` → React `window.addEventListener('message')`
+- Incoming (JS → C#): `window.external.sendMessage(json)` → C# `RegisterWebMessageReceivedHandler` callback → MessageRouter deserializes envelope → Routes to typed handler
+- Outgoing (C# → JS): C# handler → MessageRouter serializes `MessageEnvelope` → `SendWebMessage(json)` → JS `window.external.receiveMessage(callback)`
+- **Important**: The MessageRouter must skip non-JSON messages (e.g. Blazor framework messages starting with `_`) by checking if the message starts with `{` before attempting deserialization
 
 #### 4. KeyboardShortcutHandler
 
@@ -313,24 +357,21 @@ interface InteropService {
 
 **Implementation**:
 ```typescript
-class InteropServiceImpl implements InteropService {
-  sendOpenFileRequest() {
-    window.external.sendMessage(JSON.stringify({
-      type: 'OpenFileRequest'
-    }));
-  }
+// IMPORTANT: Create a single instance per component lifecycle.
+// Do NOT create multiple instances — callbacks are per-instance.
+const interop = createInteropService();
 
-  onFileLoaded(callback: (data: FileContent) => void) {
-    window.addEventListener('message', (event) => {
-      const message = JSON.parse(event.data);
-      if (message.type === 'FileLoadedResponse') {
-        callback(message.payload);
-      }
-    });
-  }
-  
-  // ... similar for onError, onWarning
-}
+// Sending (JS → C#):
+interop.sendOpenFileRequest();
+// Uses: window.external.sendMessage(JSON.stringify(envelope))
+
+// Receiving (C# → JS):
+interop.onFileLoaded(callback);
+// Uses: window.external.receiveMessage(handler)
+// NOT window.addEventListener('message') — Photino uses its own API
+
+// Cleanup on unmount:
+interop.dispose();
 ```
 
 ## Data Models

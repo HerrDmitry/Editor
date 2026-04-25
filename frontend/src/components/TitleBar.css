@@ -1,0 +1,14 @@
+.title-bar {
+  padding: 8px 16px;
+  background-color: #2d2d2d;
+  color: #cccccc;
+  font-size: 14px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.title-bar__text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

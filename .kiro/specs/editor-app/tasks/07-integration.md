@@ -5,28 +5,28 @@ Wire backend and frontend together, test end-to-end flows, and validate cross-pl
 
 ## Tasks
 
-- [ ] 10. Wire backend and frontend together
-  - [ ] 10.1 Connect MessageRouter to PhotinoHostService
+- [x] 10. Wire backend and frontend together
+  - [x] 10.1 Connect MessageRouter to PhotinoHostService
     - Register MessageRouter handlers for `OpenFileRequest`
     - Wire FileService to MessageRouter for sending responses
     - Test message flow: React → Backend → React
     - _Requirements: 7.1, 7.2_
 
-  - [ ] 10.2 Connect InteropService to App component
+  - [x] 10.2 Connect InteropService to App component
     - Wire `sendOpenFileRequest` to open file button/shortcut
     - Wire `onFileLoaded` callback to update App state
     - Wire `onError` callback to update App error state
     - Wire `onWarning` callback to display warnings
     - _Requirements: 7.1, 7.2, 7.3_
 
-  - [ ] 10.3 Test end-to-end file open flow
+  - [x] 10.3 Test end-to-end file open flow
     - Trigger open file action from React UI
     - Verify native file picker appears
     - Select file and verify content loads
     - Verify title bar, content area, and status bar update correctly
     - _Requirements: 2.1, 2.2, 3.1, 4.2, 5.1, 5.2, 5.3_
 
-- [ ] 11. Checkpoint - Ensure end-to-end integration works
+- [x] 11. Checkpoint - Ensure end-to-end integration works
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ]* 12. Write integration tests for cross-platform compatibility

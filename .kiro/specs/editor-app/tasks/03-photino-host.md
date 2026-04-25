@@ -5,8 +5,8 @@ Implement the Photino window host service and keyboard shortcut handling for the
 
 ## Tasks
 
-- [ ] 4. Implement Photino host and keyboard shortcuts
-  - [ ] 4.1 Implement PhotinoHostService
+- [x] 4. Implement Photino host and keyboard shortcuts
+  - [x] 4.1 Implement PhotinoHostService
     - Create Photino window with 1200x800 default size, centered, resizable
     - Set initial window title to "Editor"
     - Load embedded React bundle (index.html) into window
@@ -15,7 +15,7 @@ Implement the Photino window host service and keyboard shortcut handling for the
     - Implement `Shutdown()` for cleanup
     - _Requirements: 1.1, 1.2, 4.1, 7.2_
 
-  - [ ] 4.2 Implement KeyboardShortcutHandler
+  - [x] 4.2 Implement KeyboardShortcutHandler
     - Register Ctrl+O (Windows/Linux) and Cmd+O (macOS) shortcuts
     - Trigger open file action when shortcut is pressed
     - Integrate with PhotinoHostService

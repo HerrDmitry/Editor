@@ -1,0 +1,43 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+/* Warning banner */
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background-color: #4d3a00;
+  color: #ffcc02;
+  font-size: 13px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.warning-banner__icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.warning-banner__message {
+  flex: 1;
+}
+
+.warning-banner__dismiss {
+  background: none;
+  border: none;
+  color: #ffcc02;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.warning-banner__dismiss:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}

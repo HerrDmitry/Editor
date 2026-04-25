@@ -5,8 +5,8 @@ Implement the C# backend services including data models, FileService, and Messag
 
 ## Tasks
 
-- [ ] 2. Implement backend core services
-  - [ ] 2.1 Create data models and message schemas
+- [x] 2. Implement backend core services
+  - [x] 2.1 Create data models and message schemas
     - Define `FileContent`, `FileMetadata`, `FileOpenResult` records in C#
     - Define `MessageEnvelope`, `FileLoadedResponse`, `ErrorResponse`, `WarningResponse` classes
     - Define error codes enum: `FILE_NOT_FOUND`, `PERMISSION_DENIED`, `FILE_TOO_LARGE`, `INTEROP_FAILURE`, `UNKNOWN_ERROR`
@@ -18,7 +18,7 @@ Implement the C# backend services including data models, FileService, and Messag
     - Use FsCheck to verify all messages conform to MessageEnvelope schema
     - _Requirements: 7.1_
 
-  - [ ] 2.3 Implement FileService for file system operations
+  - [x] 2.3 Implement FileService for file system operations
     - Implement `OpenFileDialogAsync()` to display native file picker
     - Implement `ReadFileAsync(string filePath)` with encoding detection
     - Implement `GetFileMetadataAsync(string filePath)` to extract size, line count, encoding, last modified
@@ -45,7 +45,7 @@ Implement the C# backend services including data models, FileService, and Messag
     - Test encoding detection for UTF-8, UTF-16, ASCII files
     - _Requirements: 2.4, 2.5, 6.3_
 
-  - [ ] 2.6 Implement MessageRouter for interop communication
+  - [x] 2.6 Implement MessageRouter for interop communication
     - Implement `RegisterHandler<TRequest>(Func<TRequest, Task> handler)` for incoming messages
     - Implement `SendToUIAsync<TMessage>(TMessage message)` for outgoing messages
     - Implement JSON serialization/deserialization with error handling
@@ -58,5 +58,5 @@ Implement the C# backend services including data models, FileService, and Messag
     - Test error handling for malformed JSON
     - _Requirements: 7.1, 7.2, 7.3_
 
-- [ ] 3. Checkpoint - Ensure backend services compile and tests pass
+- [x] 3. Checkpoint - Ensure backend services compile and tests pass
   - Ensure all tests pass, ask the user if questions arise.
