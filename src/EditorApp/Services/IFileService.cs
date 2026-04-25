@@ -3,8 +3,8 @@ namespace EditorApp.Services;
 using EditorApp.Models;
 
 /// <summary>
-/// Abstraction for file system operations including reading files,
-/// validating sizes, and detecting encoding.
+/// Abstraction for file system operations including streamed reading
+/// with line offset indexing and encoding detection.
 /// </summary>
 public interface IFileService
 {
@@ -14,19 +14,13 @@ public interface IFileService
     Task<FileOpenResult> OpenFileDialogAsync();
 
     /// <summary>
-    /// Read a file from disk with encoding detection and return its content and metadata.
+    /// Scan a file to build a line offset index, count total lines, and detect encoding.
+    /// Returns metadata only — no file content is loaded into memory.
     /// </summary>
-    Task<FileContent> ReadFileAsync(string filePath);
+    Task<FileOpenMetadata> OpenFileAsync(string filePath);
 
     /// <summary>
-    /// Extract metadata (size, line count, encoding, last modified) for a file.
+    /// Read a range of lines from a previously opened file using the line offset index.
     /// </summary>
-    Task<FileMetadata> GetFileMetadataAsync(string filePath);
-
-    /// <summary>
-    /// Validate whether a file size is within acceptable limits.
-    /// Returns true if the file can be loaded. Sets warningMessage when
-    /// the file is between 10 MB and 50 MB. Returns false when the file exceeds 50 MB.
-    /// </summary>
-    bool ValidateFileSize(long fileSize, out string? warningMessage);
+    Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount);
 }

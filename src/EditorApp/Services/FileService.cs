@@ -4,35 +4,24 @@ using EditorApp.Models;
 namespace EditorApp.Services;
 
 /// <summary>
-/// Handles all file system operations including reading files,
-/// validating sizes, and detecting encoding.
+/// Handles all file system operations using streamed reading with a line offset index.
+/// Files of any size are supported — the entire file is never loaded into memory.
 /// </summary>
 public class FileService : IFileService
 {
     /// <summary>
-    /// Warning threshold: 10 MB in bytes.
+    /// Cache of line offset indices keyed by file path.
+    /// Each list contains the byte offset of the start of each line.
     /// </summary>
-    internal const long WarningSizeThreshold = 10L * 1024 * 1024;
-
-    /// <summary>
-    /// Maximum file size: 50 MB in bytes.
-    /// </summary>
-    internal const long MaximumFileSize = 50L * 1024 * 1024;
+    private readonly Dictionary<string, List<long>> _lineIndexCache = new();
 
     /// <inheritdoc />
     public Task<FileOpenResult> OpenFileDialogAsync()
     {
         try
         {
-            // Use Photino's native file dialog.
-            // PhotinoWindow.ShowOpenFile returns an array of selected paths.
-            // This will be wired up when the PhotinoWindow instance is available.
-            // For now, provide a working implementation that can be called
-            // from the host once the window reference is injected.
-            //
             // The actual native dialog integration is handled by the host layer
-            // (PhotinoHostService) which owns the window reference. This method
-            // serves as the service-layer entry point.
+            // (PhotinoHostService) which owns the window reference.
             return Task.FromResult(new FileOpenResult(false, null, "File dialog not available outside of window context."));
         }
         catch (Exception ex)
@@ -42,30 +31,7 @@ public class FileService : IFileService
     }
 
     /// <inheritdoc />
-    public async Task<FileContent> ReadFileAsync(string filePath)
-    {
-        if (!File.Exists(filePath))
-        {
-            throw new FileNotFoundException("The selected file could not be found.", filePath);
-        }
-
-        var fileInfo = new FileInfo(filePath);
-
-        if (!ValidateFileSize(fileInfo.Length, out _))
-        {
-            throw new InvalidOperationException(
-                $"File exceeds maximum size of {MaximumFileSize / (1024 * 1024)} MB: {fileInfo.Length} bytes");
-        }
-
-        var encoding = DetectEncoding(filePath);
-        var content = await File.ReadAllTextAsync(filePath, encoding);
-        var metadata = BuildMetadata(fileInfo, content, encoding);
-
-        return new FileContent(content, filePath, fileInfo.Name, metadata);
-    }
-
-    /// <inheritdoc />
-    public Task<FileMetadata> GetFileMetadataAsync(string filePath)
+    public async Task<FileOpenMetadata> OpenFileAsync(string filePath)
     {
         if (!File.Exists(filePath))
         {
@@ -75,31 +41,131 @@ public class FileService : IFileService
         var fileInfo = new FileInfo(filePath);
         var encoding = DetectEncoding(filePath);
 
-        // Read content to count lines accurately
-        var content = File.ReadAllText(filePath, encoding);
-        var metadata = BuildMetadata(fileInfo, content, encoding);
+        // Scan file to build line offset index by reading raw bytes.
+        // We cannot use StreamReader for this because its internal buffer
+        // causes stream.Position to be inaccurate after ReadLine().
+        var lineOffsets = new List<long>();
+        var bomLength = GetBomLength(encoding);
 
-        return Task.FromResult(metadata);
+        await using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536))
+        {
+            // Skip BOM if present
+            if (bomLength > 0)
+            {
+                stream.Seek(bomLength, SeekOrigin.Begin);
+            }
+
+            // First line starts after BOM (or at 0 if no BOM)
+            lineOffsets.Add(stream.Position);
+
+            var buffer = new byte[65536];
+            int bytesRead;
+            bool prevWasCR = false;
+
+            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                for (int i = 0; i < bytesRead; i++)
+                {
+                    byte b = buffer[i];
+
+                    if (b == (byte)'\n')
+                    {
+                        // \n or the \n part of \r\n — new line starts after this byte
+                        long nextLineOffset = stream.Position - bytesRead + i + 1;
+                        lineOffsets.Add(nextLineOffset);
+                        prevWasCR = false;
+                    }
+                    else if (prevWasCR)
+                    {
+                        // Previous byte was \r but this byte is not \n — standalone \r line ending
+                        long nextLineOffset = stream.Position - bytesRead + i;
+                        lineOffsets.Add(nextLineOffset);
+                        prevWasCR = (b == (byte)'\r');
+                    }
+                    else
+                    {
+                        prevWasCR = (b == (byte)'\r');
+                    }
+                }
+            }
+
+            // Handle trailing \r at end of file
+            if (prevWasCR)
+            {
+                lineOffsets.Add(stream.Length);
+            }
+        }
+
+        // If the last offset equals the file length and the file doesn't end with a newline,
+        // remove it (it's the EOF marker, not a real line start)
+        if (lineOffsets.Count > 1 && lineOffsets[lineOffsets.Count - 1] == fileInfo.Length)
+        {
+            lineOffsets.RemoveAt(lineOffsets.Count - 1);
+        }
+
+        // Store index for later ReadLinesAsync calls
+        _lineIndexCache[filePath] = lineOffsets;
+
+        // Total lines = number of line start offsets
+        var totalLines = lineOffsets.Count;
+
+        var encodingName = GetEncodingDisplayName(encoding);
+
+        return new FileOpenMetadata(
+            filePath,
+            fileInfo.Name,
+            totalLines,
+            fileInfo.Length,
+            encodingName
+        );
     }
 
     /// <inheritdoc />
-    public bool ValidateFileSize(long fileSize, out string? warningMessage)
+    public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
     {
-        if (fileSize > MaximumFileSize)
+        if (!_lineIndexCache.TryGetValue(filePath, out var lineOffsets))
         {
-            warningMessage = $"This file is too large to open (maximum {MaximumFileSize / (1024 * 1024)} MB).";
-            return false;
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
         }
 
-        if (fileSize > WarningSizeThreshold)
+        var totalLines = lineOffsets.Count;
+
+        // Clamp startLine
+        if (startLine < 0) startLine = 0;
+        if (startLine >= totalLines)
         {
-            var sizeMb = fileSize / (1024.0 * 1024.0);
-            warningMessage = $"This file is {sizeMb:F1} MB. Loading may take a moment.";
-            return true;
+            return new LinesResult(startLine, Array.Empty<string>(), totalLines);
         }
 
-        warningMessage = null;
-        return true;
+        // Clamp lineCount
+        var actualCount = Math.Min(lineCount, totalLines - startLine);
+        if (actualCount <= 0)
+        {
+            return new LinesResult(startLine, Array.Empty<string>(), totalLines);
+        }
+
+        var encoding = DetectEncoding(filePath);
+        var lines = new string[actualCount];
+
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        stream.Seek(lineOffsets[startLine], SeekOrigin.Begin);
+        using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
+
+        for (int i = 0; i < actualCount; i++)
+        {
+            lines[i] = await reader.ReadLineAsync() ?? string.Empty;
+        }
+
+        return new LinesResult(startLine, lines, totalLines);
+    }
+
+    /// <summary>
+    /// Get the byte length of the BOM for a given encoding.
+    /// </summary>
+    private static int GetBomLength(Encoding encoding)
+    {
+        var preamble = encoding.GetPreamble();
+        return preamble.Length;
     }
 
     /// <summary>
@@ -108,7 +174,6 @@ public class FileService : IFileService
     /// </summary>
     internal static Encoding DetectEncoding(string filePath)
     {
-        // Read the first few bytes to check for a BOM
         var bom = new byte[4];
         int bytesRead;
 
@@ -157,22 +222,6 @@ public class FileService : IFileService
     }
 
     /// <summary>
-    /// Build a FileMetadata record from file info, content, and detected encoding.
-    /// </summary>
-    private static FileMetadata BuildMetadata(FileInfo fileInfo, string content, Encoding encoding)
-    {
-        var lineCount = CountLines(content);
-        var encodingName = GetEncodingDisplayName(encoding);
-
-        return new FileMetadata(
-            fileInfo.Length,
-            lineCount,
-            encodingName,
-            fileInfo.LastWriteTimeUtc
-        );
-    }
-
-    /// <summary>
     /// Count the number of lines in a string. An empty string has 1 line.
     /// Lines are delimited by \n, \r\n, or \r.
     /// </summary>
@@ -189,7 +238,6 @@ public class FileService : IFileService
             if (content[i] == '\r')
             {
                 lineCount++;
-                // Skip the \n in a \r\n pair
                 if (i + 1 < content.Length && content[i + 1] == '\n')
                 {
                     i++;

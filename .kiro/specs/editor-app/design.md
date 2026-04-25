@@ -9,7 +9,7 @@ The Editor App is a cross-platform desktop application for read-only file viewin
 1. **Cross-Platform Native Experience**: Leverage Photino.Blazor to provide native window management across Windows, macOS, and Linux while maintaining a consistent UI through React
 2. **Single Executable Deployment**: Embed all resources (React bundle, static assets) into the compiled binary for zero-installation deployment
 3. **Clear Separation of Concerns**: Maintain distinct boundaries between native backend (file I/O, OS integration) and web-based UI (rendering, user interaction)
-4. **Performance for Large Files**: Implement progressive loading and size limits to maintain responsiveness
+4. **Streamed Reading for Any File Size**: Use a line offset index and on-demand line reading so files of any size can be opened without loading the entire file into memory
 5. **Reliable Interop**: Establish robust message-passing between C# backend and React frontend
 
 ### Technology Stack
@@ -117,7 +117,7 @@ The application follows a **two-tier architecture** with clear separation betwee
 │  │  Photino.Blazor Host                             │  │
 │  │  - Window Management                             │  │
 │  │  - Native File Dialogs                           │  │
-│  │  - File System Access                            │  │
+│  │  - Streamed File Reading (Line Index + Seek)     │  │
 │  │  - Message Router                                │  │
 │  └──────────────────────────────────────────────────┘  │
 └────────────────┬────────────────────────────────────────┘
@@ -130,12 +130,13 @@ The application follows a **two-tier architecture** with clear separation betwee
 │  ┌──────────────────────────────────────────────────┐  │
 │  │  React Components                                │  │
 │  │  - App Shell (Title Bar, Status Bar)            │  │
-│  │  - File Viewer (Content Display)                │  │
+│  │  - Virtual-Scrolling File Viewer                │  │
 │  │  - Loading States & Error Messages              │  │
 │  └──────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────┐  │
 │  │  State Management                                │  │
-│  │  - File Content State                           │  │
+│  │  - File Metadata State                          │  │
+│  │  - Visible Lines Buffer                         │  │
 │  │  - UI State (loading, errors)                   │  │
 │  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -147,13 +148,24 @@ The application follows a **two-tier architecture** with clear separation betwee
 1. User triggers open action (keyboard shortcut Ctrl+O or UI button)
 2. React UI sends `OpenFileRequest` message to backend
 3. Backend displays native file picker dialog
-4. User selects file → Backend validates file size
-5. Backend reads file contents and metadata
-6. Backend sends `FileLoadedResponse` message to React UI
-7. React UI updates state and renders file contents
+4. User selects file → Backend scans the file (reads through once to build a line offset index mapping each line number to its byte offset, counts total lines, detects encoding)
+5. Backend sends `FileOpenedResponse` message to React UI (metadata only: totalLines, fileSize, encoding, fileName — no file content)
+6. React UI sets up virtual scrollbar (total height = totalLines × lineHeight)
+7. React UI sends `RequestLinesMessage` for the initial visible range (e.g. lines 0–50)
+8. Backend seeks to the byte offset for the requested start line and reads the requested number of lines from disk
+9. Backend sends `LinesResponse` to React UI (startLine, lines array, totalLines)
+10. React UI renders the visible lines in the Content_Area
+
+**Scroll Flow:**
+1. User scrolls the Content_Area
+2. React UI calculates the new visible line range from scroll position: `startLine = Math.floor(scrollTop / lineHeight)`
+3. React UI sends `RequestLinesMessage` with the new startLine and lineCount
+4. Backend seeks to the byte offset for startLine using the line index, reads lineCount lines
+5. Backend sends `LinesResponse` with the requested lines
+6. React UI renders the new lines at the correct position within the virtual scroll container
 
 **Error Handling Flow:**
-1. Backend encounters error (permission denied, file not found, size limit)
+1. Backend encounters error (permission denied, file not found)
 2. Backend sends `ErrorResponse` message to React UI
 3. React UI displays error message to user
 4. Application returns to previous state
@@ -212,16 +224,15 @@ editor-app (single executable)
 
 #### 2. FileService
 
-**Responsibility**: Handle all file system operations including reading files, validating sizes, and detecting encoding.
+**Responsibility**: Handle all file system operations including scanning files to build a line offset index, reading specific line ranges on demand, and detecting encoding. Files of any size are supported — the entire file is never loaded into memory.
 
 **Key Methods**:
 ```csharp
 public interface IFileService
 {
     Task<FileOpenResult> OpenFileDialogAsync();
-    Task<FileContent> ReadFileAsync(string filePath);
-    Task<FileMetadata> GetFileMetadataAsync(string filePath);
-    bool ValidateFileSize(long fileSize, out string? warningMessage);
+    Task<FileOpenMetadata> OpenFileAsync(string filePath);
+    Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount);
 }
 ```
 
@@ -229,28 +240,34 @@ public interface IFileService
 ```csharp
 public record FileOpenResult(bool Success, string? FilePath, string? ErrorMessage);
 
-public record FileContent(
-    string Content,
+public record FileOpenMetadata(
     string FilePath,
     string FileName,
-    FileMetadata Metadata
+    int TotalLines,
+    long FileSizeBytes,
+    string Encoding
 );
 
-public record FileMetadata(
-    long FileSizeBytes,
-    int LineCount,
-    string Encoding,
-    DateTime LastModified
+public record LinesResult(
+    int StartLine,
+    string[] Lines,
+    int TotalLines
 );
 ```
 
-**Size Limits**:
-- Warning threshold: 10 MB
-- Maximum file size: 50 MB
+**Line Offset Index**:
+
+When `OpenFileAsync` is called, the service reads through the file once from start to end, recording the byte offset of each line start into a `List<long>` (the line offset index). This scan also counts total lines and detects encoding via BOM detection (falling back to UTF-8). The index is kept in memory — for a file with N lines, this costs approximately N × 8 bytes (e.g. ~80 MB for a 10-million-line file).
+
+When `ReadLinesAsync` is called, the service:
+1. Looks up the byte offset for `startLine` in the line offset index
+2. Opens a `FileStream` and seeks to that offset
+3. Reads `lineCount` lines using a `StreamReader`
+4. Returns the lines as a string array
 
 **Encoding Detection**:
-- Use `System.Text.Encoding.GetEncoding()` with BOM detection
-- Fallback to UTF-8 if detection fails
+- Use BOM detection on the first few bytes of the file
+- Fallback to UTF-8 if no BOM is detected
 - Report detected encoding in metadata
 
 #### 3. MessageRouter
@@ -299,8 +316,10 @@ public interface IKeyboardShortcutHandler
 **State**:
 ```typescript
 interface AppState {
-  fileContent: FileContent | null;
-  isLoading: boolean;
+  fileMeta: FileMeta | null;       // metadata from FileOpenedResponse
+  lines: string[] | null;          // currently visible lines from LinesResponse
+  linesStartLine: number;          // the startLine of the current lines buffer
+  isLoading: boolean;              // true during initial file scan
   error: ErrorInfo | null;
   titleBarText: string;
 }
@@ -311,11 +330,14 @@ interface AppState {
 <div className="app">
   <TitleBar title={titleBarText} />
   <ContentArea 
-    fileContent={fileContent}
+    fileMeta={fileMeta}
+    lines={lines}
+    linesStartLine={linesStartLine}
     isLoading={isLoading}
     error={error}
+    onRequestLines={handleRequestLines}
   />
-  <StatusBar metadata={fileContent?.metadata} />
+  <StatusBar metadata={fileMeta} />
 </div>
 ```
 
@@ -336,44 +358,62 @@ interface TitleBarProps {
 
 #### 3. ContentArea Component
 
-**Responsibility**: Display file contents with line numbers, scrolling, and loading/error states.
+**Responsibility**: Display file contents with virtual scrolling, line numbers, and loading/error states. Only the lines currently visible in the viewport are rendered.
 
 **Props**:
 ```typescript
 interface ContentAreaProps {
-  fileContent: FileContent | null;
+  fileMeta: FileMeta | null;
+  lines: string[] | null;
+  linesStartLine: number;
   isLoading: boolean;
   error: ErrorInfo | null;
+  onRequestLines: (startLine: number, lineCount: number) => void;
 }
 ```
 
 **Rendering Modes**:
 - **Empty State**: No file open → Display prompt message "Press Ctrl+O to open a file"
-- **Loading State**: File being loaded → Display spinner with "Loading file..."
+- **Loading State**: File being scanned → Display spinner with "Scanning file..."
 - **Error State**: Error occurred → Display error message with icon
-- **Content State**: File loaded → Display line-numbered text content
+- **Content State**: File metadata received → Virtual-scrolling line display
 
-**Content Rendering**:
+**Virtual Scrolling Implementation**:
+
+The ContentArea uses a virtual scrolling approach to handle files of any size:
+
+1. **Outer container**: A scrollable `div` with `overflow-y: auto`.
+2. **Spacer div**: A child `div` whose height is `totalLines × lineHeight` pixels. This creates the full-height scrollbar representing the entire file, even though only a small window of lines is in the DOM.
+3. **Visible lines div**: Positioned absolutely (or via `transform: translateY`) at `startLine × lineHeight` pixels from the top of the spacer. Contains only the currently visible lines.
+4. **Scroll handler**: On the `scroll` event of the outer container, calculate:
+   - `startLine = Math.floor(scrollTop / lineHeight)`
+   - `lineCount = Math.ceil(containerHeight / lineHeight) + buffer`
+   - If the new range differs from the currently loaded range, call `onRequestLines(startLine, lineCount)`
+5. **Line numbers**: Each rendered line displays a line number calculated as `linesStartLine + index + 1` (1-based), not from the array index alone.
+
 ```tsx
-<div className="content-area">
-  <div className="line-numbers">
-    {lines.map((_, index) => (
-      <div key={index} className="line-number">{index + 1}</div>
-    ))}
-  </div>
-  <div className="content-lines">
-    {lines.map((line, index) => (
-      <pre key={index} className="content-line">{line}</pre>
-    ))}
+<div className="content-area" onScroll={handleScroll} style={{ overflowY: 'auto', overflowX: 'auto' }}>
+  {/* Spacer creates full-height scrollbar */}
+  <div style={{ height: totalLines * lineHeight, position: 'relative' }}>
+    {/* Visible lines positioned at correct offset */}
+    <div style={{ position: 'absolute', top: linesStartLine * lineHeight }}>
+      {lines.map((line, index) => (
+        <div key={linesStartLine + index} className="line-row" style={{ height: lineHeight }}>
+          <span className="line-number">{linesStartLine + index + 1}</span>
+          <pre className="content-line">{line}</pre>
+        </div>
+      ))}
+    </div>
   </div>
 </div>
 ```
 
 **Styling Requirements**:
 - Monospaced font: `'Consolas', 'Monaco', 'Courier New', monospace`
-- Vertical scrolling: `overflow-y: auto`
-- Horizontal scrolling: `overflow-x: auto`
+- Vertical scrolling: `overflow-y: auto` on outer container
+- Horizontal scrolling: `overflow-x: auto` on outer container
 - Preserve whitespace: `white-space: pre`
+- Fixed line height for consistent virtual scroll calculations
 
 #### 4. StatusBar Component
 
@@ -382,7 +422,7 @@ interface ContentAreaProps {
 **Props**:
 ```typescript
 interface StatusBarProps {
-  metadata: FileMetadata | null;
+  metadata: FileMeta | null;
 }
 ```
 
@@ -400,9 +440,10 @@ interface StatusBarProps {
 ```typescript
 interface InteropService {
   sendOpenFileRequest(): void;
-  onFileLoaded(callback: (data: FileContent) => void): void;
+  sendRequestLines(startLine: number, lineCount: number): void;
+  onFileOpened(callback: (data: FileMeta) => void): void;
+  onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
   onError(callback: (error: ErrorInfo) => void): void;
-  onWarning(callback: (warning: WarningInfo) => void): void;
 }
 ```
 
@@ -416,7 +457,8 @@ interface InteropService {
 
 function createInteropService() {
   // ... registers window.external.receiveMessage(handler)
-  // ... exposes sendOpenFileRequest(), onFileLoaded(), onError(), onWarning(), dispose()
+  // ... routes incoming messages by type: FileOpenedResponse, LinesResponse, ErrorResponse
+  // ... exposes sendOpenFileRequest(), sendRequestLines(), onFileOpened(), onLinesResponse(), onError(), dispose()
 }
 
 // Expose to window for use by App.js
@@ -447,24 +489,44 @@ interface MessageEnvelope {
 }
 ```
 
-#### Backend → Frontend Messages
-
-**FileLoadedResponse**:
+**RequestLinesMessage**:
 ```json
 {
-  "type": "FileLoadedResponse",
+  "type": "RequestLinesMessage",
   "payload": {
-    "content": "file contents as string",
-    "filePath": "/path/to/file.txt",
+    "startLine": 500,
+    "lineCount": 50
+  },
+  "timestamp": "2024-01-15T10:30:02Z"
+}
+```
+
+#### Backend → Frontend Messages
+
+**FileOpenedResponse** (sent after initial file scan — metadata only, no file content):
+```json
+{
+  "type": "FileOpenedResponse",
+  "payload": {
     "fileName": "file.txt",
-    "metadata": {
-      "fileSizeBytes": 2048,
-      "lineCount": 42,
-      "encoding": "UTF-8",
-      "lastModified": "2024-01-15T09:00:00Z"
-    }
+    "totalLines": 125000,
+    "fileSizeBytes": 4194304,
+    "encoding": "UTF-8"
   },
   "timestamp": "2024-01-15T10:30:01Z"
+}
+```
+
+**LinesResponse** (sent in response to RequestLinesMessage):
+```json
+{
+  "type": "LinesResponse",
+  "payload": {
+    "startLine": 500,
+    "lines": ["line 501 content", "line 502 content", "..."],
+    "totalLines": 125000
+  },
+  "timestamp": "2024-01-15T10:30:02Z"
 }
 ```
 
@@ -484,43 +546,27 @@ interface MessageEnvelope {
 **Error Codes**:
 - `FILE_NOT_FOUND`: File does not exist
 - `PERMISSION_DENIED`: Insufficient permissions to read file
-- `FILE_TOO_LARGE`: File exceeds 50 MB limit
 - `INTEROP_FAILURE`: Communication failure between backend and frontend
 - `UNKNOWN_ERROR`: Unexpected error occurred
 
-**WarningResponse**:
-```json
-{
-  "type": "WarningResponse",
-  "payload": {
-    "warningCode": "LARGE_FILE",
-    "message": "This file is 15 MB. Loading may take a moment.",
-    "filePath": "/path/to/large.txt",
-    "fileSizeBytes": 15728640
-  },
-  "timestamp": "2024-01-15T10:30:01Z"
-}
-```
-
 ### Frontend State Models
 
-**FileContent**:
+**FileMeta**:
 ```typescript
-interface FileContent {
-  content: string;
-  filePath: string;
+interface FileMeta {
   fileName: string;
-  metadata: FileMetadata;
+  totalLines: number;
+  fileSizeBytes: number;
+  encoding: string;
 }
 ```
 
-**FileMetadata**:
+**LinesResponsePayload**:
 ```typescript
-interface FileMetadata {
-  fileSizeBytes: number;
-  lineCount: number;
-  encoding: string;
-  lastModified: string; // ISO 8601
+interface LinesResponsePayload {
+  startLine: number;
+  lines: string[];
+  totalLines: number;
 }
 ```
 
@@ -533,45 +579,53 @@ interface ErrorInfo {
 }
 ```
 
-**WarningInfo**:
-```typescript
-interface WarningInfo {
-  warningCode: string;
-  message: string;
-  filePath: string;
-  fileSizeBytes: number;
-}
-```
-
 ## Correctness Properties
 
 *A property is a characteristic or behavior that should hold true across all valid executions of a system—essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Property 1: Content Preservation Through Load-and-Display Pipeline
+### Property 1: Line Offset Index Correctness
 
-*For any* text file content (including various line endings, whitespace characters, and special characters), when the file is read by the Backend and sent to the File_Viewer for display, the displayed content SHALL exactly match the original file content with all line endings, spaces, tabs, and characters preserved.
+*For any* text file content, when the Backend builds a line offset index during `OpenFileAsync`, seeking to the byte offset recorded for line N and reading one line SHALL produce exactly the Nth line of the original file content.
 
-**Validates: Requirements 2.2, 3.1, 3.6**
+**Validates: Requirements 6.2**
 
-### Property 2: Dialog Cancellation Idempotence
+### Property 2: ReadLinesAsync Round-Trip Correctness
 
-*For any* application state, when the user cancels the File_Picker dialog, the application state SHALL remain unchanged (no file loaded, no state modified, no side effects).
+*For any* text file content (including various line endings, whitespace characters, tabs, and special characters) and *for any* valid line range (startLine, lineCount) within the file, `ReadLinesAsync(filePath, startLine, lineCount)` SHALL return an array of lines that exactly matches the corresponding lines from the original file content, preserving all whitespace and characters.
+
+**Validates: Requirements 3.1, 3.7, 6.4**
+
+### Property 3: File Metadata Accuracy
+
+*For any* text file, when `OpenFileAsync` completes, the returned `FileOpenMetadata` SHALL have a `TotalLines` value that exactly matches the number of lines in the file (where lines are delimited by \n, \r\n, or \r) and a `FileSizeBytes` value that exactly matches the file's size on disk.
+
+**Validates: Requirements 2.2, 5.2**
+
+### Property 4: Dialog Cancellation Idempotence
+
+*For any* application state (whether a file is loaded or not, regardless of current scroll position or displayed lines), when the user cancels the File_Picker dialog, the application state SHALL remain identical to the state before the dialog was opened.
 
 **Validates: Requirements 2.3**
 
-### Property 3: Line Number Sequential Generation
+### Property 5: Line Number Sequential Generation
 
-*For any* file content with N lines, the File_Viewer SHALL display line numbers as a sequential series from 1 to N, where each line number corresponds to its line position in the file.
+*For any* startLine offset and lineCount, the displayed line numbers SHALL form a sequential series from (startLine + 1) to (startLine + lineCount), where each line number corresponds to its 1-based position in the file.
 
 **Validates: Requirements 3.2**
 
-### Property 4: Title Bar Format Consistency
+### Property 6: Virtual Scrollbar Height
 
-*For any* file name, when a file is successfully loaded, the Title_Bar SHALL display the title in the format "{fileName} - Editor" where {fileName} is the base name of the file without the full path.
+*For any* totalLines value and a fixed lineHeight, the virtual scroll spacer element's height SHALL equal totalLines × lineHeight pixels, ensuring the scrollbar accurately represents the full extent of the file.
+
+**Validates: Requirements 3.4, 6.6**
+
+### Property 7: Title Bar Format Consistency
+
+*For any* file name, when a file is successfully opened, the Title_Bar SHALL display the title in the format "{fileName} - Editor" where {fileName} is the base name of the file without the full path.
 
 **Validates: Requirements 4.2**
 
-### Property 5: File Size Human-Readable Formatting
+### Property 8: File Size Human-Readable Formatting
 
 *For any* file size in bytes, the Status_Bar SHALL display the size in human-readable format following these rules:
 - Sizes < 1024 bytes: display as "X bytes"
@@ -580,39 +634,17 @@ interface WarningInfo {
 
 **Validates: Requirements 5.1**
 
-### Property 6: Line Count Accuracy
+### Property 9: Encoding Detection Correctness
 
-*For any* file content, the Status_Bar SHALL display a line count that exactly matches the number of lines in the file, where lines are delimited by line ending characters (\n, \r\n, or \r).
-
-**Validates: Requirements 5.2**
-
-### Property 7: Encoding Detection Correctness
-
-*For any* file with a detectable text encoding (UTF-8, UTF-16, ASCII, etc.), the Status_Bar SHALL display the correct encoding name as detected by the Backend's encoding detection logic.
+*For any* file with a detectable BOM (UTF-8 BOM, UTF-16 LE/BE BOM), the Backend's encoding detection SHALL return the correct encoding name. For files without a BOM, the Backend SHALL default to UTF-8.
 
 **Validates: Requirements 5.3**
 
-### Property 8: File Size Validation Thresholds
+### Property 10: LinesResponse Message Structure Correctness
 
-*For any* file size:
-- If size > 10 MB AND size <= 50 MB: the App SHALL display a warning message before loading
-- If size > 50 MB: the App SHALL reject the file and display an error message indicating the file is too large
-- If size <= 10 MB: the App SHALL load the file without warnings
-
-**Validates: Requirements 6.1, 6.3**
-
-### Property 9: Interop Message Structure Correctness
-
-*For any* file content and metadata, when the Backend sends a FileLoadedResponse message to the React UI, the message SHALL conform to the MessageEnvelope schema with type "FileLoadedResponse" and a payload containing content, filePath, fileName, and metadata fields.
+*For any* `LinesResult` (containing startLine, lines array, and totalLines), when the Backend serializes it as a `LinesResponse` message, the resulting JSON SHALL conform to the `MessageEnvelope` schema with type `"LinesResponse"` and a payload containing `startLine`, `lines`, and `totalLines` fields matching the original data.
 
 **Validates: Requirements 7.1**
-
-### Property 10: Cancellation State Preservation
-
-*For any* application state with a currently loaded file, when the user triggers the open file action and then cancels the File_Picker, the previously loaded file SHALL remain displayed without changes.
-
-**Validates: Requirements 2.3**
-
 
 ## Error Handling
 
@@ -623,22 +655,16 @@ The application handles errors at multiple layers with consistent error reportin
 #### 1. File System Errors
 
 **File Not Found**:
-- **Detection**: Backend catches `FileNotFoundException` when attempting to read file
+- **Detection**: Backend catches `FileNotFoundException` when attempting to scan or read file
 - **Response**: Send `ErrorResponse` with code `FILE_NOT_FOUND`
 - **User Message**: "The selected file could not be found."
 - **Recovery**: User can try opening a different file
 
 **Permission Denied**:
-- **Detection**: Backend catches `UnauthorizedAccessException` when attempting to read file
+- **Detection**: Backend catches `UnauthorizedAccessException` when attempting to scan or read file
 - **Response**: Send `ErrorResponse` with code `PERMISSION_DENIED`
 - **User Message**: "You do not have permission to read this file."
 - **Recovery**: User can try opening a different file or adjust file permissions
-
-**File Too Large**:
-- **Detection**: Backend checks file size before reading
-- **Response**: Send `ErrorResponse` with code `FILE_TOO_LARGE`
-- **User Message**: "This file is too large to open (maximum 50 MB)."
-- **Recovery**: User can try opening a smaller file
 
 #### 2. Interop Errors
 
@@ -657,73 +683,90 @@ The application handles errors at multiple layers with consistent error reportin
 #### 3. Encoding Errors
 
 **Unreadable Encoding**:
-- **Detection**: Backend catches `DecoderFallbackException` when reading file
-- **Response**: Attempt to read as UTF-8 with replacement characters, send warning
-- **User Message**: "Some characters in this file could not be decoded and have been replaced."
-- **Recovery**: File is displayed with replacement characters (�) for unreadable bytes
+- **Detection**: Backend catches `DecoderFallbackException` when reading lines
+- **Response**: Attempt to read as UTF-8 with replacement characters, send the lines with replacement characters (�) for unreadable bytes
+- **User Message**: Displayed inline — unreadable bytes appear as replacement characters
+- **Recovery**: File is displayed with replacement characters
 
 ### Error Handling Strategy
 
 **Backend Error Handling**:
 ```csharp
-public async Task<FileContent> ReadFileAsync(string filePath)
+public async Task<FileOpenMetadata> OpenFileAsync(string filePath)
 {
     try
     {
-        // Validate file exists
         if (!File.Exists(filePath))
-        {
             throw new FileNotFoundException("File not found", filePath);
-        }
 
-        // Validate file size
         var fileInfo = new FileInfo(filePath);
-        if (!ValidateFileSize(fileInfo.Length, out var warning))
+        var encoding = DetectEncoding(filePath);
+
+        // Scan file to build line offset index
+        var lineOffsets = new List<long>();
+        using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: true))
         {
-            throw new FileTooLargeException($"File exceeds maximum size: {fileInfo.Length} bytes");
+            lineOffsets.Add(stream.Position);
+            while (reader.ReadLine() != null)
+            {
+                lineOffsets.Add(stream.Position);
+            }
         }
 
-        // Read file with encoding detection
-        var encoding = DetectEncoding(filePath);
-        var content = await File.ReadAllTextAsync(filePath, encoding);
-        
-        // Build metadata
-        var metadata = await GetFileMetadataAsync(filePath);
-        
-        return new FileContent(content, filePath, fileInfo.Name, metadata);
+        // Store index for later ReadLinesAsync calls
+        _lineIndexCache[filePath] = lineOffsets;
+
+        return new FileOpenMetadata(
+            filePath, fileInfo.Name, lineOffsets.Count - 1,
+            fileInfo.Length, encoding.EncodingName);
     }
     catch (FileNotFoundException ex)
     {
         await SendErrorAsync("FILE_NOT_FOUND", "The selected file could not be found.", ex.FileName);
         throw;
     }
-    catch (UnauthorizedAccessException ex)
+    catch (UnauthorizedAccessException)
     {
         await SendErrorAsync("PERMISSION_DENIED", "You do not have permission to read this file.", filePath);
         throw;
     }
-    catch (FileTooLargeException ex)
+    catch (Exception)
     {
-        await SendErrorAsync("FILE_TOO_LARGE", "This file is too large to open (maximum 50 MB).", filePath);
+        await SendErrorAsync("UNKNOWN_ERROR", "An unexpected error occurred while opening the file.", filePath);
         throw;
     }
-    catch (Exception ex)
+}
+
+public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+{
+    var lineOffsets = _lineIndexCache[filePath];
+    var totalLines = lineOffsets.Count - 1;
+    var actualCount = Math.Min(lineCount, totalLines - startLine);
+
+    var encoding = DetectEncoding(filePath);
+    var lines = new string[actualCount];
+
+    using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+    stream.Seek(lineOffsets[startLine], SeekOrigin.Begin);
+    using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
+
+    for (int i = 0; i < actualCount; i++)
     {
-        await SendErrorAsync("UNKNOWN_ERROR", "An unexpected error occurred while reading the file.", filePath);
-        throw;
+        lines[i] = await reader.ReadLineAsync() ?? string.Empty;
     }
+
+    return new LinesResult(startLine, lines, totalLines);
 }
 ```
 
 **Frontend Error Handling**:
 ```typescript
-const handleFileLoadError = (error: ErrorInfo) => {
+const handleError = (error: ErrorInfo) => {
   setError(error);
   setIsLoading(false);
-  setFileContent(null);
-  
-  // Display error message to user
-  // Error persists until user takes another action (open new file)
+  setFileMeta(null);
+  setLines(null);
 };
 
 const handleInteropTimeout = () => {
@@ -739,7 +782,7 @@ const handleInteropTimeout = () => {
 
 **Backend Logging**:
 - Use structured logging with severity levels (Info, Warning, Error)
-- Log all file operations (open, read, size validation)
+- Log all file operations (open/scan, line reads)
 - Log all interop messages (sent/received)
 - Log all errors with stack traces
 - Log file: `editor-app.log` in application directory
@@ -768,50 +811,87 @@ The testing strategy employs a dual approach combining property-based testing fo
 
 **Backend Property Tests** (C# with FsCheck):
 
-1. **Content Preservation** (Property 1):
+1. **Line Offset Index Correctness** (Property 1):
    ```csharp
-   // Feature: editor-app, Property 1: Content preservation through load-and-display pipeline
+   // Feature: editor-app, Property 1: Line offset index correctness
    [Property]
-   public Property ContentPreservationThroughPipeline()
+   public Property LineOffsetIndexCorrectness()
    {
        return Prop.ForAll(
-           Arb.Generate<string>().Where(s => s != null),
-           content =>
+           Arb.Generate<NonEmptyArray<string>>(),
+           linesArray =>
            {
-               // Write content to temp file
+               var content = string.Join("\n", linesArray.Get);
                var tempFile = WriteToTempFile(content);
+               var metadata = fileService.OpenFileAsync(tempFile).Result;
                
-               // Read file using FileService
-               var fileContent = fileService.ReadFileAsync(tempFile).Result;
-               
-               // Verify content matches
-               return fileContent.Content == content;
+               // For each line, seek using index and verify content
+               for (int i = 0; i < linesArray.Get.Length; i++)
+               {
+                   var result = fileService.ReadLinesAsync(tempFile, i, 1).Result;
+                   if (result.Lines[0] != linesArray.Get[i]) return false;
+               }
+               return true;
            }
        );
    }
    ```
 
-2. **Line Count Accuracy** (Property 6):
+2. **ReadLinesAsync Round-Trip Correctness** (Property 2):
    ```csharp
-   // Feature: editor-app, Property 6: Line count accuracy
+   // Feature: editor-app, Property 2: ReadLinesAsync round-trip correctness
    [Property]
-   public Property LineCountAccuracy()
+   public Property ReadLinesRoundTrip()
    {
        return Prop.ForAll(
-           Arb.Generate<string>(),
-           content =>
+           Arb.Generate<NonEmptyArray<string>>(),
+           Gen.Choose(0, 100).ToArbitrary(),
+           Gen.Choose(1, 50).ToArbitrary(),
+           (linesArray, startLine, lineCount) =>
            {
-               var expectedLineCount = CountLines(content);
-               var metadata = GetFileMetadata(content);
-               return metadata.LineCount == expectedLineCount;
+               var content = string.Join("\n", linesArray.Get);
+               var tempFile = WriteToTempFile(content);
+               fileService.OpenFileAsync(tempFile).Wait();
+               
+               var clampedStart = Math.Min(startLine, linesArray.Get.Length - 1);
+               var clampedCount = Math.Min(lineCount, linesArray.Get.Length - clampedStart);
+               
+               var result = fileService.ReadLinesAsync(tempFile, clampedStart, clampedCount).Result;
+               var expected = linesArray.Get.Skip(clampedStart).Take(clampedCount).ToArray();
+               
+               return result.Lines.SequenceEqual(expected);
            }
        );
    }
    ```
 
-3. **File Size Formatting** (Property 5):
+3. **File Metadata Accuracy** (Property 3):
    ```csharp
-   // Feature: editor-app, Property 5: File size human-readable formatting
+   // Feature: editor-app, Property 3: File metadata accuracy
+   [Property]
+   public Property FileMetadataAccuracy()
+   {
+       return Prop.ForAll(
+           Arb.Generate<NonEmptyArray<string>>(),
+           linesArray =>
+           {
+               var content = string.Join("\n", linesArray.Get);
+               var tempFile = WriteToTempFile(content);
+               var metadata = fileService.OpenFileAsync(tempFile).Result;
+               
+               var expectedLines = linesArray.Get.Length;
+               var expectedSize = new FileInfo(tempFile).Length;
+               
+               return metadata.TotalLines == expectedLines &&
+                      metadata.FileSizeBytes == expectedSize;
+           }
+       );
+   }
+   ```
+
+4. **File Size Formatting** (Property 8):
+   ```csharp
+   // Feature: editor-app, Property 8: File size human-readable formatting
    [Property]
    public Property FileSizeFormatting()
    {
@@ -832,43 +912,23 @@ The testing strategy employs a dual approach combining property-based testing fo
    }
    ```
 
-4. **File Size Validation Thresholds** (Property 8):
+5. **LinesResponse Message Structure** (Property 10):
    ```csharp
-   // Feature: editor-app, Property 8: File size validation thresholds
+   // Feature: editor-app, Property 10: LinesResponse message structure correctness
    [Property]
-   public Property FileSizeValidationThresholds()
+   public Property LinesResponseMessageStructure()
    {
        return Prop.ForAll(
-           Arb.Generate<long>().Where(size => size >= 0),
-           fileSize =>
+           Arb.Generate<int>().Where(i => i >= 0),
+           Arb.Generate<string[]>().Where(a => a != null),
+           Arb.Generate<int>().Where(i => i >= 0),
+           (startLine, lines, totalLines) =>
            {
-               var result = ValidateFileSize(fileSize, out var warning);
-               
-               if (fileSize > 50 * 1024 * 1024)
-                   return !result; // Should reject
-               else if (fileSize > 10 * 1024 * 1024)
-                   return result && warning != null; // Should warn
-               else
-                   return result && warning == null; // Should accept
-           }
-       );
-   }
-   ```
-
-5. **Interop Message Structure** (Property 9):
-   ```csharp
-   // Feature: editor-app, Property 9: Interop message structure correctness
-   [Property]
-   public Property InteropMessageStructure()
-   {
-       return Prop.ForAll(
-           Arb.Generate<FileContent>(),
-           fileContent =>
-           {
-               var message = messageRouter.SerializeFileLoadedResponse(fileContent);
+               var linesResult = new LinesResult(startLine, lines, totalLines);
+               var message = messageRouter.SerializeLinesResponse(linesResult);
                var envelope = JsonSerializer.Deserialize<MessageEnvelope>(message);
                
-               return envelope.Type == "FileLoadedResponse" &&
+               return envelope.Type == "LinesResponse" &&
                       envelope.Payload != null &&
                       envelope.Timestamp != null;
            }
@@ -878,12 +938,12 @@ The testing strategy employs a dual approach combining property-based testing fo
 
 **Frontend Property Tests** (TypeScript with fast-check):
 
-1. **Title Bar Format** (Property 4):
+1. **Title Bar Format** (Property 7):
    ```typescript
-   // Feature: editor-app, Property 4: Title bar format consistency
+   // Feature: editor-app, Property 7: Title bar format consistency
    test('title bar format consistency', () => {
      fc.assert(
-       fc.property(fc.string(), (fileName) => {
+       fc.property(fc.string({ minLength: 1 }), (fileName) => {
          const title = formatTitleBar(fileName);
          return title === `${fileName} - Editor`;
        }),
@@ -892,33 +952,60 @@ The testing strategy employs a dual approach combining property-based testing fo
    });
    ```
 
-2. **Line Number Generation** (Property 3):
+2. **Line Number Generation** (Property 5):
    ```typescript
-   // Feature: editor-app, Property 3: Line number sequential generation
-   test('line numbers are sequential', () => {
+   // Feature: editor-app, Property 5: Line number sequential generation
+   test('line numbers are sequential from startLine offset', () => {
      fc.assert(
-       fc.property(fc.array(fc.string()), (lines) => {
-         const lineNumbers = generateLineNumbers(lines.length);
-         return lineNumbers.every((num, idx) => num === idx + 1);
-       }),
+       fc.property(
+         fc.nat(10000),
+         fc.integer({ min: 1, max: 200 }),
+         (startLine, lineCount) => {
+           const lineNumbers = generateLineNumbers(startLine, lineCount);
+           return lineNumbers.every((num, idx) => num === startLine + idx + 1);
+         }
+       ),
        { numRuns: 100 }
      );
    });
    ```
 
-3. **Dialog Cancellation Idempotence** (Property 2):
+3. **Virtual Scrollbar Height** (Property 6):
    ```typescript
-   // Feature: editor-app, Property 2: Dialog cancellation idempotence
+   // Feature: editor-app, Property 6: Virtual scrollbar height
+   test('scrollbar height equals totalLines * lineHeight', () => {
+     fc.assert(
+       fc.property(
+         fc.integer({ min: 0, max: 10_000_000 }),
+         fc.integer({ min: 10, max: 30 }),
+         (totalLines, lineHeight) => {
+           const height = calculateScrollHeight(totalLines, lineHeight);
+           return height === totalLines * lineHeight;
+         }
+       ),
+       { numRuns: 100 }
+     );
+   });
+   ```
+
+4. **Dialog Cancellation Idempotence** (Property 4):
+   ```typescript
+   // Feature: editor-app, Property 4: Dialog cancellation idempotence
    test('canceling dialog preserves state', () => {
      fc.assert(
        fc.property(fc.record({
-         fileContent: fc.option(fc.string(), { nil: null }),
+         fileMeta: fc.option(fc.record({
+           fileName: fc.string(),
+           totalLines: fc.nat(),
+           fileSizeBytes: fc.nat(),
+           encoding: fc.string()
+         }), { nil: null }),
          isLoading: fc.boolean(),
          error: fc.option(fc.string(), { nil: null })
        }), (initialState) => {
-         const stateBefore = { ...initialState };
+         const stateBefore = JSON.parse(JSON.stringify(initialState));
          handleDialogCancel(initialState);
-         return deepEqual(initialState, stateBefore);
+         return JSON.stringify(initialState) === JSON.stringify(stateBefore);
        }),
        { numRuns: 100 }
      );
@@ -941,7 +1028,7 @@ The testing strategy employs a dual approach combining property-based testing fo
        var app = new App();
        var initialState = app.GetInitialState();
        
-       Assert.Null(initialState.FileContent);
+       Assert.Null(initialState.FileMeta);
        Assert.False(initialState.IsLoading);
        Assert.Null(initialState.Error);
    }
@@ -950,20 +1037,19 @@ The testing strategy employs a dual approach combining property-based testing fo
 2. **Permission Error Handling** (Requirement 2.4):
    ```csharp
    [Fact]
-   public async Task ReadFile_PermissionDenied_SendsErrorResponse()
+   public async Task OpenFile_PermissionDenied_SendsErrorResponse()
    {
        var mockFileSystem = new Mock<IFileSystem>();
        mockFileSystem
-           .Setup(fs => fs.ReadAllTextAsync(It.IsAny<string>(), It.IsAny<Encoding>()))
-           .ThrowsAsync(new UnauthorizedAccessException());
+           .Setup(fs => fs.OpenRead(It.IsAny<string>()))
+           .Throws(new UnauthorizedAccessException());
        
        var fileService = new FileService(mockFileSystem.Object);
        
        await Assert.ThrowsAsync<UnauthorizedAccessException>(
-           () => fileService.ReadFileAsync("test.txt")
+           () => fileService.OpenFileAsync("test.txt")
        );
        
-       // Verify error message was sent
        mockMessageRouter.Verify(mr => mr.SendToUIAsync(
            It.Is<ErrorResponse>(er => er.ErrorCode == "PERMISSION_DENIED")
        ));
@@ -973,7 +1059,7 @@ The testing strategy employs a dual approach combining property-based testing fo
 3. **File Not Found Error Handling** (Requirement 2.5):
    ```csharp
    [Fact]
-   public async Task ReadFile_FileNotFound_SendsErrorResponse()
+   public async Task OpenFile_FileNotFound_SendsErrorResponse()
    {
        var mockFileSystem = new Mock<IFileSystem>();
        mockFileSystem
@@ -983,7 +1069,7 @@ The testing strategy employs a dual approach combining property-based testing fo
        var fileService = new FileService(mockFileSystem.Object);
        
        await Assert.ThrowsAsync<FileNotFoundException>(
-           () => fileService.ReadFileAsync("missing.txt")
+           () => fileService.OpenFileAsync("missing.txt")
        );
        
        mockMessageRouter.Verify(mr => mr.SendToUIAsync(
@@ -997,9 +1083,7 @@ The testing strategy employs a dual approach combining property-based testing fo
    [Fact]
    public void TitleBar_NoFileOpen_DisplaysAppName()
    {
-       var titleBar = new TitleBar();
-       var title = titleBar.GetTitle(null);
-       
+       var title = FormatTitleBar(null);
        Assert.Equal("Editor", title);
    }
    ```
@@ -1011,21 +1095,20 @@ The testing strategy employs a dual approach combining property-based testing fo
    {
        var statusBar = new StatusBar();
        var display = statusBar.GetDisplay(null);
-       
        Assert.Empty(display);
    }
    ```
 
 **Frontend Unit Tests**:
 
-1. **Loading State Display** (Requirement 6.2):
+1. **Loading State Display** (Requirement 6.3):
    ```typescript
-   test('displays loading indicator while file is loading', () => {
+   test('displays loading indicator while file is being scanned', () => {
      const { getByText } = render(
-       <ContentArea fileContent={null} isLoading={true} error={null} />
+       <ContentArea fileMeta={null} lines={null} linesStartLine={0}
+                    isLoading={true} error={null} onRequestLines={() => {}} />
      );
-     
-     expect(getByText('Loading file...')).toBeInTheDocument();
+     expect(getByText('Scanning file...')).toBeInTheDocument();
    });
    ```
 
@@ -1036,11 +1119,10 @@ The testing strategy employs a dual approach combining property-based testing fo
        errorCode: 'FILE_NOT_FOUND',
        message: 'The selected file could not be found.'
      };
-     
      const { getByText } = render(
-       <ContentArea fileContent={null} isLoading={false} error={error} />
+       <ContentArea fileMeta={null} lines={null} linesStartLine={0}
+                    isLoading={false} error={error} onRequestLines={() => {}} />
      );
-     
      expect(getByText(error.message)).toBeInTheDocument();
    });
    ```
@@ -1049,44 +1131,40 @@ The testing strategy employs a dual approach combining property-based testing fo
    ```typescript
    test('content area uses monospaced font', () => {
      const { container } = render(
-       <ContentArea fileContent={mockFileContent} isLoading={false} error={null} />
+       <ContentArea fileMeta={mockFileMeta} lines={['hello']} linesStartLine={0}
+                    isLoading={false} error={null} onRequestLines={() => {}} />
      );
-     
      const contentLine = container.querySelector('.content-line');
      const styles = window.getComputedStyle(contentLine);
-     
      expect(styles.fontFamily).toMatch(/Consolas|Monaco|Courier New|monospace/);
    });
    ```
 
-4. **Vertical Scrolling** (Requirement 3.4):
+4. **Horizontal Scrolling** (Requirement 3.6):
    ```typescript
-   test('content area provides vertical scrolling for large content', () => {
-     const largeContent = Array(1000).fill('line').join('\n');
-     const mockFile = { ...mockFileContent, content: largeContent };
-     
+   test('content area provides horizontal scrolling for wide lines', () => {
+     const longLine = 'x'.repeat(5000);
      const { container } = render(
-       <ContentArea fileContent={mockFile} isLoading={false} error={null} />
+       <ContentArea fileMeta={mockFileMeta} lines={[longLine]} linesStartLine={0}
+                    isLoading={false} error={null} onRequestLines={() => {}} />
      );
-     
      const contentArea = container.querySelector('.content-area');
-     expect(contentArea.scrollHeight).toBeGreaterThan(contentArea.clientHeight);
+     expect(contentArea.scrollWidth).toBeGreaterThan(contentArea.clientWidth);
    });
    ```
 
-5. **Interop Communication Failure** (Requirement 7.3):
+5. **Interop Communication Failure** (Requirement 7.4):
    ```typescript
    test('displays error when interop fails', () => {
      const mockInterop = {
-       sendOpenFileRequest: jest.fn(() => {
-         throw new Error('Interop failure');
-       })
+       sendOpenFileRequest: jest.fn(() => { throw new Error('Interop failure'); }),
+       sendRequestLines: jest.fn(),
+       onFileOpened: jest.fn(),
+       onLinesResponse: jest.fn(),
+       onError: jest.fn(),
      };
-     
      const { getByText } = render(<App interop={mockInterop} />);
-     
      fireEvent.click(getByText('Open File'));
-     
      expect(getByText(/communication failure/i)).toBeInTheDocument();
    });
    ```
@@ -1109,18 +1187,23 @@ The testing strategy employs a dual approach combining property-based testing fo
    - Verify native OS file dialog appears
    - Verify dialog is modal and blocks application
 
-3. **Keyboard Shortcut** (Requirement 8.1):
+3. **Streamed File Open** (Requirement 6.1, 6.2):
+   - Open a large file (100MB+)
+   - Verify the scan completes and metadata is sent
+   - Verify memory usage stays bounded (not loading entire file)
+
+4. **Virtual Scroll Line Requests** (Requirement 3.5, 7.3):
+   - Open a file, scroll to various positions
+   - Verify RequestLinesMessage is sent and LinesResponse is received
+   - Verify correct lines are displayed at each scroll position
+
+5. **Keyboard Shortcut** (Requirement 8.1):
    - Press Ctrl+O (or Cmd+O on macOS)
    - Verify file picker dialog appears
 
-4. **Cross-Platform Compatibility** (Requirement 1.4):
+6. **Cross-Platform Compatibility** (Requirement 1.4):
    - Run application on Windows, macOS, and Linux
    - Verify all features work on each platform
-
-5. **Interop Message Flow** (Requirement 7.2):
-   - Send OpenFileRequest from React UI
-   - Verify Backend receives message
-   - Verify Backend invokes file picker
 
 ### Test Coverage Goals
 
@@ -1140,8 +1223,9 @@ tests/
 │   │   ├── MessageRouterTests.cs
 │   │   └── KeyboardShortcutHandlerTests.cs
 │   ├── Properties/
-│   │   ├── ContentPreservationProperties.cs
-│   │   ├── FileSizeValidationProperties.cs
+│   │   ├── LineIndexProperties.cs
+│   │   ├── ReadLinesProperties.cs
+│   │   ├── MetadataProperties.cs
 │   │   ├── FormattingProperties.cs
 │   │   └── InteropProperties.cs
 │   └── Integration/
@@ -1161,6 +1245,7 @@ src/
 │   └── __properties__/
 │       ├── titleBar.properties.test.ts
 │       ├── lineNumbers.properties.test.ts
+│       ├── scrollbar.properties.test.ts
 │       └── statePreservation.properties.test.ts
 └── services/
     └── __tests__/
@@ -1173,4 +1258,3 @@ src/
 - Run integration tests on pull requests
 - Enforce minimum code coverage thresholds
 - Run tests on all target platforms (Windows, macOS, Linux) in CI pipeline
-

@@ -2,16 +2,17 @@
 // No module imports — React, ReactDOM, and all components are globals
 // exposed on window by their respective script files.
 
-interface FileContent {
-  content: string;
-  filePath: string;
+interface FileMeta {
   fileName: string;
-  metadata: {
-    fileSizeBytes: number;
-    lineCount: number;
-    encoding: string;
-    lastModified: string;
-  };
+  totalLines: number;
+  fileSizeBytes: number;
+  encoding: string;
+}
+
+interface LinesResponsePayload {
+  startLine: number;
+  lines: string[];
+  totalLines: number;
 }
 
 interface ErrorInfo {
@@ -20,43 +21,50 @@ interface ErrorInfo {
   details?: string;
 }
 
-interface WarningInfo {
-  warningCode: string;
-  message: string;
-  filePath: string;
-  fileSizeBytes: number;
-}
-
 function App() {
-  const [fileContent, setFileContent] = React.useState<FileContent | null>(null);
+  const [fileMeta, setFileMeta] = React.useState<FileMeta | null>(null);
+  const [lines, setLines] = React.useState<string[] | null>(null);
+  const [linesStartLine, setLinesStartLine] = React.useState(0);
   const [isLoading, setIsLoading] = React.useState(false);
   const [error, setError] = React.useState<ErrorInfo | null>(null);
-  const [warning, setWarning] = React.useState<WarningInfo | null>(null);
   const [titleBarText, setTitleBarText] = React.useState('Editor');
 
-  const handleDismissWarning = React.useCallback(() => {
-    setWarning(null);
+  const interopRef = React.useRef<any>(null);
+  const lastRequestedStartRef = React.useRef<number>(0);
+
+  const handleRequestLines = React.useCallback((startLine: number, lineCount: number) => {
+    if (interopRef.current) {
+      lastRequestedStartRef.current = startLine;
+      interopRef.current.sendRequestLines(startLine, lineCount);
+    }
   }, []);
 
   React.useEffect(() => {
     const interop = (window as any).createInteropService();
+    interopRef.current = interop;
 
-    interop.onFileLoaded((data: FileContent) => {
-      setFileContent(data);
+    interop.onFileOpened((data: FileMeta) => {
+      setFileMeta(data);
       setIsLoading(false);
       setError(null);
-      setWarning(null);
       setTitleBarText(`${data.fileName} - Editor`);
+      // Request initial lines
+      lastRequestedStartRef.current = 0;
+      interop.sendRequestLines(0, 50);
+    });
+
+    interop.onLinesResponse((data: LinesResponsePayload) => {
+      // Only accept the response if it matches the most recently requested startLine.
+      // This prevents stale responses from overwriting the current view during fast scrolling.
+      if (data.startLine === lastRequestedStartRef.current) {
+        setLines(data.lines);
+        setLinesStartLine(data.startLine);
+      }
     });
 
     interop.onError((err: ErrorInfo) => {
       setError(err);
       setIsLoading(false);
-      setWarning(null);
-    });
-
-    interop.onWarning((warn: WarningInfo) => {
-      setWarning(warn);
     });
 
     // Ctrl+O / Cmd+O keyboard shortcut
@@ -65,7 +73,6 @@ function App() {
         e.preventDefault();
         setIsLoading(true);
         setError(null);
-        setWarning(null);
         interop.sendOpenFileRequest();
       }
     }
@@ -86,21 +93,15 @@ function App() {
   return (
     <div className="app">
       {React.createElement(TitleBarComponent, { title: titleBarText })}
-      {warning && (
-        <div className="warning-banner" role="alert">
-          <span className="warning-banner__icon" aria-hidden="true">⚠</span>
-          <span className="warning-banner__message">{warning.message}</span>
-          <button
-            className="warning-banner__dismiss"
-            onClick={handleDismissWarning}
-            aria-label="Dismiss warning"
-          >
-            ✕
-          </button>
-        </div>
-      )}
-      {React.createElement(ContentAreaComponent, { fileContent, isLoading, error })}
-      {React.createElement(StatusBarComponent, { metadata: fileContent?.metadata ?? null })}
+      {React.createElement(ContentAreaComponent, {
+        fileMeta,
+        lines,
+        linesStartLine,
+        isLoading,
+        error,
+        onRequestLines: handleRequestLines,
+      })}
+      {React.createElement(StatusBarComponent, { metadata: fileMeta })}
     </div>
   );
 }
