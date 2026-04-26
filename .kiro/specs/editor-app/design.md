@@ -358,7 +358,7 @@ interface TitleBarProps {
 
 #### 3. ContentArea Component
 
-**Responsibility**: Display file contents with virtual scrolling, line numbers, and loading/error states. Only the lines currently visible in the viewport are rendered.
+**Responsibility**: Display file contents with virtual scrolling, line numbers, custom scrollbar, and loading/error states. Only the lines currently visible in the viewport are rendered.
 
 **Props**:
 ```typescript
@@ -376,44 +376,83 @@ interface ContentAreaProps {
 - **Empty State**: No file open → Display prompt message "Press Ctrl+O to open a file"
 - **Loading State**: File being scanned → Display spinner with "Scanning file..."
 - **Error State**: Error occurred → Display error message with icon
-- **Content State**: File metadata received → Virtual-scrolling line display
+- **Content State**: File metadata received → Three-column virtual-scrolling layout
 
-**Virtual Scrolling Implementation**:
+**Three-Column Layout**:
 
-The ContentArea uses a virtual scrolling approach to handle files of any size:
-
-1. **Outer container**: A scrollable `div` with `overflow-y: auto`.
-2. **Spacer div**: A child `div` whose height is `totalLines × lineHeight` pixels. This creates the full-height scrollbar representing the entire file, even though only a small window of lines is in the DOM.
-3. **Visible lines div**: Positioned absolutely (or via `transform: translateY`) at `startLine × lineHeight` pixels from the top of the spacer. Contains only the currently visible lines.
-4. **Scroll handler**: On the `scroll` event of the outer container, calculate:
-   - `startLine = Math.floor(scrollTop / lineHeight)`
-   - `lineCount = Math.ceil(containerHeight / lineHeight) + buffer`
-   - If the new range differs from the currently loaded range, call `onRequestLines(startLine, lineCount)`
-5. **Line numbers**: Each rendered line displays a line number calculated as `linesStartLine + index + 1` (1-based), not from the array index alone.
-
-```tsx
-<div className="content-area" onScroll={handleScroll} style={{ overflowY: 'auto', overflowX: 'auto' }}>
-  {/* Spacer creates full-height scrollbar */}
-  <div style={{ height: totalLines * lineHeight, position: 'relative' }}>
-    {/* Visible lines positioned at correct offset */}
-    <div style={{ position: 'absolute', top: linesStartLine * lineHeight }}>
-      {lines.map((line, index) => (
-        <div key={linesStartLine + index} className="line-row" style={{ height: lineHeight }}>
-          <span className="line-number">{linesStartLine + index + 1}</span>
-          <pre className="content-line">{line}</pre>
-        </div>
-      ))}
-    </div>
-  </div>
-</div>
 ```
+┌────────┬──────────────────────────┬───────────┐
+│ Line   │ Content Column           │ Custom    │
+│ Numbers│ (native scroll hidden)   │ Scrollbar │
+│ (60px) │ (flex)                   │ (14px)    │
+└────────┴──────────────────────────┴───────────┘
+```
+
+1. **Line numbers column** (60px): Synced vertically with content, no horizontal scroll
+2. **Content column** (flex): Native scrollbar hidden via CSS, handles wheel/trackpad input
+3. **Custom scrollbar** (14px): Operates in line space, reflects current position
+
+**Virtual Scrolling with Capped Height**:
+
+Browsers cap element heights at ~33 million pixels. For files with more than ~1.6M lines (at 20px/line), the spacer would exceed this. The spacer height is capped at 10 million pixels.
+
+**Proportional Scroll Mapping**:
+
+Since the spacer height is capped, a simple `scrollTop * scale / LINE_HEIGHT` mapping fails to reach the last line. Instead, use proportional mapping:
+
+```typescript
+// scrollTop → line number
+scrollFraction = scrollTop / maxScrollTop;  // 0.0 to 1.0
+line = scrollFraction * (totalLines - visibleLineCount);
+
+// line number → scrollTop
+scrollFraction = line / (totalLines - visibleLineCount);
+scrollTop = scrollFraction * maxScrollTop;
+```
+
+This ensures:
+- `scrollTop = 0` → line 0
+- `scrollTop = max` → last possible line (totalLines - visibleLineCount)
+- Linear and exact regardless of scroll height cap
+
+**Line Positioning Clamping**:
+
+Rendered lines are positioned at `lineToScrollTop(linesStartLine)`, clamped so they never extend past the spacer bottom:
+```typescript
+clampedOffset = Math.min(linesPixelOffset, totalHeight - renderedLinesHeight);
+```
+This prevents the browser from bouncing `scrollTop` back when lines overflow the spacer.
 
 **Styling Requirements**:
 - Monospaced font: `'Consolas', 'Monaco', 'Courier New', monospace`
-- Vertical scrolling: `overflow-y: auto` on outer container
-- Horizontal scrolling: `overflow-x: auto` on outer container
+- Native vertical scrollbar hidden: `scrollbar-width: none` + `::-webkit-scrollbar { display: none }`
+- Horizontal scrolling: `overflow-x: auto` on content column
 - Preserve whitespace: `white-space: pre`
-- Fixed line height for consistent virtual scroll calculations
+- Fixed line height (20px) for consistent virtual scroll calculations
+
+#### 3a. CustomScrollbar Component
+
+**Responsibility**: Visual scrollbar that operates in line-number space rather than pixel space.
+
+**Props**:
+```typescript
+interface CustomScrollbarProps {
+  totalLines: number;
+  visibleLineCount: number;
+  currentTopLine: number;
+  onScrollToLine: (line: number) => void;
+}
+```
+
+**Thumb Metrics**:
+- Position: `(currentTopLine / maxScrollLine) * scrollableTrack`
+- Size: `Math.max(20, (visibleLineCount / totalLines) * trackHeight)`
+- Where `maxScrollLine = totalLines - visibleLineCount` and `scrollableTrack = trackHeight - thumbHeight`
+
+**Interactions**:
+- **Thumb drag**: mousedown on thumb → document-level mousemove/mouseup → proportional line calculation → `onScrollToLine(targetLine)`
+- **Track click**: click above thumb → page up by `visibleLineCount`; click below → page down
+- **Wheel/trackpad**: handled by the native hidden scroll; custom scrollbar just reflects the position via `currentTopLine` prop
 
 #### 4. StatusBar Component
 

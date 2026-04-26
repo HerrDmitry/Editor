@@ -151,6 +151,14 @@ html, body {
   white-space: pre;
 }
 
+/* Hide native vertical scrollbar but keep scroll functionality */
+.content-column--hidden-scrollbar {
+  scrollbar-width: none; /* Firefox */
+}
+.content-column--hidden-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Edge */
+}
+
 /* ---------- Status Bar ---------- */
 
 .status-bar {
@@ -176,4 +184,43 @@ html, body {
 
 .status-bar__separator {
   color: rgba(255, 255, 255, 0.5);
+}
+
+/* ---------- Custom Scrollbar ---------- */
+
+.custom-scrollbar {
+  width: 14px;
+  flex-shrink: 0;
+  background-color: #1e1e1e;
+  position: relative;
+  cursor: default;
+  user-select: none;
+}
+
+.custom-scrollbar__track {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  right: 2px;
+  bottom: 0;
+  background-color: #1e1e1e;
+}
+
+.custom-scrollbar__thumb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background-color: #424242;
+  border-radius: 4px;
+  min-height: 20px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.custom-scrollbar__thumb:hover {
+  background-color: #555555;
+}
+
+.custom-scrollbar__thumb--active {
+  background-color: #686868;
 }

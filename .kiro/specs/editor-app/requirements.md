@@ -139,3 +139,32 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 7. THE MessageRouter SHALL have unit tests verifying handler registration, routing, and error handling
 8. ALL unit tests SHALL pass on `dotnet test` without requiring a running application or Photino window
 9. THE test project SHALL achieve 80%+ code coverage for FileService and MessageRouter
+
+### Requirement 10: Custom Scrollbar
+
+**User Story:** As a user, I want a scrollbar that accurately represents my position in the file by line number, so that I can navigate large files precisely regardless of how lines are rendered.
+
+#### Acceptance Criteria
+
+1. THE Content_Area SHALL display a custom vertical scrollbar on the right side that represents the full line range of the file (line 1 to totalLines)
+2. THE native/browser vertical scrollbar on the Content_Area SHALL be hidden — only the custom scrollbar is visible
+3. WHEN the user scrolls the Content_Area via mouse wheel or trackpad, THE custom scrollbar thumb position SHALL update to reflect the current top visible line number
+4. WHEN the user drags the custom scrollbar thumb, THE Content_Area SHALL jump to the corresponding line number and display that line at the top of the viewport
+5. WHEN the user clicks on the custom scrollbar track (above or below the thumb), THE Content_Area SHALL page up or page down by one viewport height worth of lines
+6. THE custom scrollbar thumb size SHALL be proportional to the number of visible lines relative to the total line count (e.g. if 50 lines are visible out of 10,000 total, the thumb occupies 0.5% of the track)
+7. THE custom scrollbar SHALL work correctly with the existing virtual scrolling — scrolling via the custom scrollbar SHALL trigger line range requests to the backend
+8. THE Content_Area SHALL still support smooth pixel-level scrolling via mouse wheel/trackpad using the native (hidden) scroll mechanism, with the custom scrollbar position updating to match
+9. THE line numbers column SHALL scroll in sync with the content, as it does today
+10. THE App SHALL handle files with millions of lines without hitting browser element height limits
+
+#### Implementation Notes
+
+- **Browser max element height**: Browsers cap element heights at ~33 million pixels. For files with more than ~1.6M lines (at 20px per line), the spacer div would exceed this limit. The spacer height is capped at 10 million pixels.
+- **Proportional scroll mapping**: Since the spacer height is capped, a simple `scrollTop * scale` mapping doesn't work — it fails to reach the last line because the container height eats into the scroll range. Instead, use proportional mapping:
+  - `scrollFraction = scrollTop / maxScrollTop` (0.0 to 1.0)
+  - `line = scrollFraction * (totalLines - visibleLineCount)`
+  - This ensures `scrollTop = 0` maps to line 0 and `scrollTop = max` maps to the last possible line.
+- **Line positioning clamping**: The rendered lines are positioned at `lineToScrollTop(linesStartLine)`, clamped so they never extend past the spacer bottom. This prevents the browser from bouncing `scrollTop` back.
+- **Three-column layout**: Line numbers (60px) | Content (flex, hidden native scrollbar) | Custom scrollbar (14px)
+- **Custom scrollbar operates in line space**: The thumb position and drag calculations use line numbers, not pixels. This decouples the scrollbar from the actual rendered pixel height.
+
