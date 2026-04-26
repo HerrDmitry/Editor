@@ -123,3 +123,19 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 #### Acceptance Criteria
 
 1. WHEN the user presses Ctrl+O (Cmd+O on macOS), THE App SHALL trigger the open file action and display the File_Picker
+
+### Requirement 9: Unit Testing
+
+**User Story:** As a developer, I want comprehensive unit tests for the backend services, so that I can refactor and extend the codebase with confidence.
+
+#### Acceptance Criteria
+
+1. THE FileService SHALL have unit tests covering line offset index building for all line ending types (\n, \r\n, \r, mixed)
+2. THE FileService SHALL have unit tests covering ReadLinesAsync for boundary conditions (first lines, middle lines, last lines, beyond end, negative start)
+3. THE FileService SHALL have unit tests covering encoding detection for all supported BOM types and the no-BOM fallback
+4. THE FileService SHALL have property-based tests (FsCheck) verifying that for any file content, ReadLinesAsync returns the correct lines at any valid offset
+5. THE MessageRouter SHALL have unit tests covering message serialization (SendToUIAsync) and deserialization (HandleMessageAsync)
+6. THE MessageRouter SHALL have unit tests verifying that non-JSON messages, malformed JSON, and unknown message types are silently ignored
+7. THE MessageRouter SHALL have unit tests verifying handler registration, routing, and error handling
+8. ALL unit tests SHALL pass on `dotnet test` without requiring a running application or Photino window
+9. THE test project SHALL achieve 80%+ code coverage for FileService and MessageRouter
