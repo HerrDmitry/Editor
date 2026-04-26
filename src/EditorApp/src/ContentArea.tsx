@@ -28,13 +28,19 @@ interface ContentAreaProps {
 
 function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequestLines }: ContentAreaProps) {
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const lineNumbersRef = React.useRef<HTMLDivElement>(null);
   const lastRequestedRef = React.useRef<{ startLine: number; lineCount: number }>({ startLine: -1, lineCount: -1 });
   const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleScroll = React.useCallback(() => {
     if (!fileMeta || !containerRef.current) return;
 
-    // Debounce scroll requests to avoid flooding the backend
+    // Sync line numbers vertical scroll with content scroll
+    if (lineNumbersRef.current) {
+      lineNumbersRef.current.scrollTop = containerRef.current.scrollTop;
+    }
+
+    // Debounce line requests to avoid flooding the backend
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
     }
@@ -95,31 +101,49 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequ
   const totalHeight = fileMeta.totalLines * LINE_HEIGHT;
 
   return (
-    <div
-      className="content-area content-area--virtual"
-      ref={containerRef}
-      onScroll={handleScroll}
-      style={{ overflowY: 'auto', overflowX: 'auto', position: 'relative' }}
-    >
-      {/* Spacer creates full-height scrollbar */}
-      <div style={{ height: totalHeight, position: 'relative' }}>
-        {/* Visible lines positioned at correct offset */}
-        {lines && (
-          <div style={{ position: 'absolute', top: linesStartLine * LINE_HEIGHT, left: 0, right: 0 }}>
-            {lines.map((line: string, index: number) => (
-              <div
-                key={linesStartLine + index}
-                className="line-row"
-                style={{ height: LINE_HEIGHT, display: 'flex', alignItems: 'center' }}
-              >
-                <span className="line-number" aria-hidden="true">
+    <div className="content-area content-area--virtual" style={{ display: 'flex', flexDirection: 'row' }}>
+      {/* Line numbers column — scrolls vertically only, never horizontally */}
+      <div
+        className="line-numbers-column"
+        ref={lineNumbersRef}
+        style={{ overflowY: 'hidden', overflowX: 'hidden', flexShrink: 0, width: 60 }}
+      >
+        <div style={{ height: totalHeight, position: 'relative' }}>
+          {lines && (
+            <div style={{ position: 'absolute', top: linesStartLine * LINE_HEIGHT, left: 0, right: 0 }}>
+              {lines.map((_: string, index: number) => (
+                <div
+                  key={linesStartLine + index}
+                  className="line-number-row"
+                  style={{ height: LINE_HEIGHT, lineHeight: LINE_HEIGHT + 'px', textAlign: 'right', paddingRight: 12 }}
+                >
                   {linesStartLine + index + 1}
-                </span>
-                <pre className="content-line">{line}</pre>
-              </div>
-            ))}
-          </div>
-        )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      {/* Content column — scrolls both vertically and horizontally */}
+      <div
+        className="content-column"
+        ref={containerRef}
+        onScroll={handleScroll}
+        style={{ overflowY: 'auto', overflowX: 'auto', flex: 1, minWidth: 0 }}
+      >
+        <div style={{ height: totalHeight, position: 'relative' }}>
+          {lines && (
+            <div style={{ position: 'absolute', top: linesStartLine * LINE_HEIGHT, left: 0 }}>
+              {lines.map((line: string, index: number) => (
+                <pre
+                  key={linesStartLine + index}
+                  className="content-line"
+                  style={{ height: LINE_HEIGHT, lineHeight: LINE_HEIGHT + 'px', margin: 0 }}
+                >{line}</pre>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -70,6 +70,7 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 6. WHEN the file contents contain lines wider than the visible area, THE Content_Area SHALL provide horizontal scrolling to access the full line width
 7. THE File_Viewer SHALL preserve the original line endings and whitespace of the file contents
 8. THE Backend SHALL only hold the currently visible portion of the file in memory, not the entire file
+9. WHEN the user scrolls horizontally, THE line numbers column SHALL remain fixed (sticky) on the left side and always visible
 
 ### Requirement 4: Title Bar File Indication
 
