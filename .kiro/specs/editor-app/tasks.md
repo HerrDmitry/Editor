@@ -21,6 +21,7 @@ The implementation is split into 8 phases, each in its own file:
 9. **[tasks/09-migrate-to-tsc.md](./tasks/09-migrate-to-tsc.md)** - Migrate frontend from Vite/npm to bundled tsc (no npm dependency)
 10. **[tasks/10-streamed-reading.md](./tasks/10-streamed-reading.md)** - Streamed file reading and virtual scrolling (any file size)
 11. **[tasks/11-unit-tests.md](./tasks/11-unit-tests.md)** - Unit tests and property-based tests for backend services
+12. **[tasks/12-custom-scrollbar.md](./tasks/12-custom-scrollbar.md)** - Custom scrollbar bound to line numbers
 
 See **[tasks/README.md](./tasks/README.md)** for detailed information about the task organization, implementation approach, and property-based testing strategy.
 
