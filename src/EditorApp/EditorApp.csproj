@@ -24,6 +24,10 @@
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="EditorApp.Tests" />
+  </ItemGroup>
+
   <!-- Embed wwwroot files as resources so everything is in the single executable -->
   <ItemGroup>
     <Content Remove="wwwroot\**" />

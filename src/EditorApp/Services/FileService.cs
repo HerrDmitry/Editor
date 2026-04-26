@@ -184,7 +184,8 @@ public class FileService : IFileService
 
         if (bytesRead < 2)
         {
-            return Encoding.UTF8;
+            // No BOM possible with fewer than 2 bytes — fall back to UTF-8 without BOM.
+            return new UTF8Encoding(false);
         }
 
         // Check for UTF-32 BE BOM: 00 00 FE FF
@@ -217,8 +218,10 @@ public class FileService : IFileService
             return Encoding.Unicode;
         }
 
-        // No BOM detected — fall back to UTF-8
-        return Encoding.UTF8;
+        // No BOM detected — fall back to UTF-8 without BOM.
+        // Using UTF8Encoding(false) so GetPreamble() returns empty,
+        // which prevents OpenFileAsync from skipping non-existent BOM bytes.
+        return new UTF8Encoding(false);
     }
 
     /// <summary>

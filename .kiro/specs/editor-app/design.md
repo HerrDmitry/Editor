@@ -1258,3 +1258,7 @@ src/
 - Run integration tests on pull requests
 - Enforce minimum code coverage thresholds
 - Run tests on all target platforms (Windows, macOS, Linux) in CI pipeline
+
+## Detailed Test Design
+
+For the complete test design including test matrices, test infrastructure (mocks, helpers), and property-based test specifications, see **[test-design.md](./test-design.md)**.
