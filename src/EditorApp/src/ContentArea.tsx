@@ -189,10 +189,10 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequ
       </div>
       {/* Custom scrollbar column */}
       {React.createElement((window as any).CustomScrollbar, {
-        totalLines: fileMeta.totalLines,
-        visibleLineCount,
-        currentTopLine,
-        onScrollToLine: handleScrollToLine,
+        range: fileMeta.totalLines - visibleLineCount,
+        position: currentTopLine,
+        viewportSize: visibleLineCount,
+        onPositionChange: (pos: number) => handleScrollToLine(Math.round(pos)),
       })}
     </div>
   );
