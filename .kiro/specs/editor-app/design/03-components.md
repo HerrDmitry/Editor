@@ -117,6 +117,7 @@ interface AppState {
   isLoading: boolean;              // true during initial file scan
   error: ErrorInfo | null;
   titleBarText: string;
+  wrapLines: boolean;              // line wrapping state (default: false)
 }
 ```
 
@@ -130,9 +131,14 @@ interface AppState {
     linesStartLine={linesStartLine}
     isLoading={isLoading}
     error={error}
+    wrapLines={wrapLines}
     onRequestLines={handleRequestLines}
   />
-  <StatusBar metadata={fileMeta} />
+  <StatusBar 
+    metadata={fileMeta}
+    wrapLines={wrapLines}
+    onWrapLinesChange={handleWrapLinesChange}
+  />
 </div>
 ```
 
@@ -163,6 +169,7 @@ interface ContentAreaProps {
   linesStartLine: number;
   isLoading: boolean;
   error: ErrorInfo | null;
+  wrapLines: boolean;
   onRequestLines: (startLine: number, lineCount: number) => void;
 }
 ```
@@ -221,9 +228,43 @@ This prevents the browser from bouncing `scrollTop` back when lines overflow the
 **Styling Requirements**:
 - Monospaced font: `'Consolas', 'Monaco', 'Courier New', monospace`
 - Native vertical scrollbar hidden: `scrollbar-width: none` + `::-webkit-scrollbar { display: none }`
-- Horizontal scrolling: `overflow-x: auto` on content column
-- Preserve whitespace: `white-space: pre`
+- Horizontal scrolling: `overflow-x: auto` on content column when `wrapLines` is false, `overflow-x: hidden` when `wrapLines` is true
+- Preserve whitespace: `white-space: pre` when `wrapLines` is false, `white-space: pre-wrap` when `wrapLines` is true
 - Fixed line height (20px) for consistent virtual scroll calculations
+
+**Line Wrapping Behavior**:
+
+When `wrapLines` is true:
+- Lines that exceed the visible width of the content column are wrapped to multiple visual rows
+- The line number is displayed only on the first visual row of each logical line
+- Subsequent visual rows of the same logical line have no line number displayed
+- The vertical scrollbar continues to represent logical lines (not visual rows)
+- Horizontal scrolling is disabled (`overflow-x: hidden`)
+- Text wrapping is enabled (`white-space: pre-wrap`)
+
+When `wrapLines` is false:
+- Lines are displayed without wrapping
+- Each logical line occupies exactly one visual row
+- Horizontal scrolling is enabled for lines that exceed the visible width
+- Text wrapping is disabled (`white-space: pre`)
+
+**Line Number Rendering with Wrapping**:
+
+The line numbers column must be synchronized with the content column. When a line wraps to multiple visual rows, the line number appears only on the first row. This can be achieved by:
+1. Rendering each logical line as a separate container (e.g., a `<div>` with class `line-container`)
+2. Within each container, display the line number and the line content side-by-side
+3. The line number has `align-self: flex-start` or similar to stay at the top of the container
+4. The line content wraps naturally within its column when `white-space: pre-wrap` is set
+
+Example structure:
+```tsx
+<div className="line-container">
+  <div className="line-number">{lineNum}</div>
+  <div className="line-content" style={{ whiteSpace: wrapLines ? 'pre-wrap' : 'pre' }}>
+    {lineText}
+  </div>
+</div>
+```
 
 ### 3a. CustomScrollbar Component
 
@@ -276,12 +317,14 @@ This ensures:
 
 ### 4. StatusBar Component
 
-**Responsibility**: Display file metadata (size, line count, encoding).
+**Responsibility**: Display file metadata (size, line count, encoding) and provide line wrapping control.
 
 **Props**:
 ```typescript
 interface StatusBarProps {
   metadata: FileMeta | null;
+  wrapLines: boolean;
+  onWrapLinesChange: (enabled: boolean) => void;
 }
 ```
 
@@ -289,7 +332,11 @@ interface StatusBarProps {
 - File size: Format as "1.2 KB", "3.4 MB", etc.
 - Line count: "150 lines"
 - Encoding: "UTF-8", "ASCII", etc.
+- Wrap Lines checkbox: Labeled "Wrap Lines", reflects current wrapping state
 - When no file open: Display empty or "No file open"
+
+**Interaction**:
+- When the user toggles the "Wrap Lines" checkbox, call `onWrapLinesChange(newValue)` to notify the parent component (App) of the state change
 
 ### 5. InteropService (Frontend)
 

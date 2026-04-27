@@ -289,6 +289,79 @@ The testing strategy employs a dual approach combining property-based testing fo
    });
    ```
 
+8. **Line Wrapping State Toggle Idempotence** (Property 14):
+   ```typescript
+   // Feature: editor-app, Property 14: Line wrapping state toggle idempotence
+   test('toggling wrap lines twice returns to original state', () => {
+     fc.assert(
+       fc.property(
+         fc.record({
+           fileMeta: fc.record({
+             fileName: fc.string(),
+             totalLines: fc.nat(),
+             fileSizeBytes: fc.nat(),
+             encoding: fc.string()
+           }),
+           lines: fc.array(fc.string()),
+           linesStartLine: fc.nat(),
+           wrapLines: fc.boolean()
+         }),
+         (initialState) => {
+           const originalWrapLines = initialState.wrapLines;
+           const stateAfterFirstToggle = { ...initialState, wrapLines: !originalWrapLines };
+           const stateAfterSecondToggle = { ...stateAfterFirstToggle, wrapLines: originalWrapLines };
+           
+           // Verify wrapping state returned to original
+           if (stateAfterSecondToggle.wrapLines !== originalWrapLines) return false;
+           
+           // Verify other state unchanged
+           return stateAfterSecondToggle.fileMeta === initialState.fileMeta &&
+                  stateAfterSecondToggle.lines === initialState.lines &&
+                  stateAfterSecondToggle.linesStartLine === initialState.linesStartLine;
+         }
+       ),
+       { numRuns: 100 }
+     );
+   });
+   ```
+
+9. **Logical Line Numbering Preservation** (Property 15):
+   ```typescript
+   // Feature: editor-app, Property 15: Logical line numbering preservation with wrapping
+   test('line numbers match logical line positions regardless of wrapping', () => {
+     fc.assert(
+       fc.property(
+         fc.integer({ min: 0, max: 10_000 }),    // startLine
+         fc.array(fc.string(), { minLength: 1, maxLength: 100 }), // lines
+         fc.boolean(),                            // wrapLines
+         (startLine, lines, wrapLines) => {
+           const lineNumbers = generateLineNumbers(startLine, lines.length);
+           return lineNumbers.every((num, idx) => num === startLine + idx + 1);
+         }
+       ),
+       { numRuns: 100 }
+     );
+   });
+   ```
+
+10. **Vertical Scrollbar Logical Line Representation** (Property 16):
+    ```typescript
+    // Feature: editor-app, Property 16: Vertical scrollbar logical line representation
+    test('scrollbar range equals totalLines regardless of wrapping state', () => {
+      fc.assert(
+        fc.property(
+          fc.integer({ min: 1, max: 1_000_000 }), // totalLines
+          fc.boolean(),                            // wrapLines
+          (totalLines, wrapLines) => {
+            const scrollbarRange = calculateScrollbarRange(totalLines, wrapLines);
+            return scrollbarRange === totalLines;
+          }
+        ),
+        { numRuns: 100 }
+      );
+    });
+    ```
+
 ## Unit Testing
 
 **Purpose**: Test specific examples, edge cases, error conditions, and integration points that are not suitable for property-based testing.
@@ -446,6 +519,95 @@ The testing strategy employs a dual approach combining property-based testing fo
    });
    ```
 
+6. **Wrap Lines Checkbox Display** (Requirement 11.1):
+   ```typescript
+   test('status bar displays wrap lines checkbox', () => {
+     const { getByLabelText } = render(
+       <StatusBar metadata={mockFileMeta} wrapLines={false} onWrapLinesChange={() => {}} />
+     );
+     expect(getByLabelText('Wrap Lines')).toBeInTheDocument();
+   });
+   ```
+
+7. **Wrap Lines Default State** (Requirement 11.7):
+   ```typescript
+   test('wrap lines defaults to disabled on launch', () => {
+     const { getByLabelText } = render(<App />);
+     const checkbox = getByLabelText('Wrap Lines') as HTMLInputElement;
+     expect(checkbox.checked).toBe(false);
+   });
+   ```
+
+8. **Wrap Lines Enables Text Wrapping** (Requirement 11.2):
+   ```typescript
+   test('enabling wrap lines applies pre-wrap and hides horizontal scroll', () => {
+     const { container } = render(
+       <ContentArea 
+         fileMeta={mockFileMeta} 
+         lines={['x'.repeat(5000)]} 
+         linesStartLine={0}
+         isLoading={false} 
+         error={null} 
+         wrapLines={true}
+         onRequestLines={() => {}} 
+       />
+     );
+     const contentLine = container.querySelector('.line-content');
+     const styles = window.getComputedStyle(contentLine);
+     expect(styles.whiteSpace).toBe('pre-wrap');
+     
+     const contentColumn = container.querySelector('.content-column');
+     const columnStyles = window.getComputedStyle(contentColumn);
+     expect(columnStyles.overflowX).toBe('hidden');
+   });
+   ```
+
+9. **Wrap Lines Disables Text Wrapping** (Requirement 11.3):
+   ```typescript
+   test('disabling wrap lines applies pre and enables horizontal scroll', () => {
+     const { container } = render(
+       <ContentArea 
+         fileMeta={mockFileMeta} 
+         lines={['x'.repeat(5000)]} 
+         linesStartLine={0}
+         isLoading={false} 
+         error={null} 
+         wrapLines={false}
+         onRequestLines={() => {}} 
+       />
+     );
+     const contentLine = container.querySelector('.line-content');
+     const styles = window.getComputedStyle(contentLine);
+     expect(styles.whiteSpace).toBe('pre');
+     
+     const contentColumn = container.querySelector('.content-column');
+     const columnStyles = window.getComputedStyle(contentColumn);
+     expect(columnStyles.overflowX).toBe('auto');
+   });
+   ```
+
+10. **Line Number Only on First Visual Row** (Requirement 11.5):
+    ```typescript
+    test('wrapped line shows line number only on first visual row', () => {
+      const longLine = 'x'.repeat(5000);
+      const { container } = render(
+        <ContentArea 
+          fileMeta={mockFileMeta} 
+          lines={[longLine]} 
+          linesStartLine={0}
+          isLoading={false} 
+          error={null} 
+          wrapLines={true}
+          onRequestLines={() => {}} 
+        />
+      );
+      const lineContainer = container.querySelector('.line-container');
+      const lineNumbers = lineContainer.querySelectorAll('.line-number');
+      // Should have exactly one line number element per logical line
+      expect(lineNumbers.length).toBe(1);
+    });
+    ```
+
 ## Integration Testing
 
 **Purpose**: Test end-to-end flows and integration with external systems (OS file dialogs, Photino interop).
@@ -486,7 +648,7 @@ The testing strategy employs a dual approach combining property-based testing fo
 
 - **Backend**: 80%+ code coverage for FileService, MessageRouter, and core logic
 - **Frontend**: 80%+ code coverage for React components and interop service
-- **Property Tests**: 100% coverage of all correctness properties (13 properties)
+- **Property Tests**: 100% coverage of all correctness properties (16 properties)
 - **Integration Tests**: Coverage of all cross-boundary interactions (interop, file system, OS dialogs)
 
 ## Test Organization
@@ -523,7 +685,8 @@ src/
 │       ├── titleBar.properties.test.ts
 │       ├── lineNumbers.properties.test.ts
 │       ├── scrollbar.properties.test.ts
-│       └── statePreservation.properties.test.ts
+│       ├── statePreservation.properties.test.ts
+│       └── lineWrapping.properties.test.ts
 └── services/
     └── __tests__/
         └── InteropService.test.ts

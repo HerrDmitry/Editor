@@ -151,6 +151,18 @@ html, body {
   white-space: pre;
 }
 
+/* Line container for wrapped mode — flex row with line number + content */
+.line-container {
+  display: flex;
+  flex-direction: row;
+}
+
+.line-number-row {
+  color: #858585;
+  user-select: none;
+  font-size: 14px;
+}
+
 /* Hide native vertical scrollbar but keep scroll functionality */
 .content-column--hidden-scrollbar {
   scrollbar-width: none; /* Firefox */
@@ -184,6 +196,22 @@ html, body {
 
 .status-bar__separator {
   color: rgba(255, 255, 255, 0.5);
+}
+
+.status-bar__wrap-toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+  user-select: none;
+}
+
+.status-bar__wrap-checkbox {
+  cursor: pointer;
+  accent-color: #ffffff;
 }
 
 /* ---------- Custom Scrollbar ---------- */

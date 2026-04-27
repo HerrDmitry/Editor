@@ -71,6 +71,16 @@ The application follows a **two-tier architecture** with clear separation betwee
 3. React UI displays error message to user
 4. Application returns to previous state
 
+**Line Wrapping Toggle Flow:**
+1. User toggles the "Wrap Lines" checkbox in the StatusBar
+2. StatusBar calls `onWrapLinesChange(newValue)` callback
+3. App component updates `wrapLines` state
+4. App component passes updated `wrapLines` prop to ContentArea
+5. ContentArea re-renders with new wrapping behavior:
+   - If `wrapLines` is true: applies `white-space: pre-wrap` and `overflow-x: hidden`, line numbers appear only on first visual row of wrapped lines
+   - If `wrapLines` is false: applies `white-space: pre` and `overflow-x: auto`, each logical line is one visual row
+6. Vertical scrollbar continues to represent logical lines (not visual rows) regardless of wrapping state
+
 ## Deployment Architecture
 
 The application is packaged as a single executable using .NET's single-file publishing with embedded resources:

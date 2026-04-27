@@ -157,3 +157,17 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 9. THE Virtual_Scrollbar thumb size SHALL be proportional to the viewport size relative to the total range (e.g. if viewport represents 50 units out of 10,000 total, the thumb occupies 0.5% of the track)
 10. THE Virtual_Scrollbar SHALL be a self-contained, reusable component with no dependencies on the Content_Area, Backend, or any other application-specific component
 
+### Requirement 11: Line Wrapping
+
+**User Story:** As a user, I want to wrap long lines to fit within the visible area, so that I can read content without horizontal scrolling.
+
+#### Acceptance Criteria
+
+1. THE Status_Bar SHALL display a checkbox control labeled "Wrap Lines"
+2. WHEN the user toggles the "Wrap Lines" checkbox to enabled, THE File_Viewer SHALL wrap lines that exceed the visible width of the Content_Area
+3. WHEN the user toggles the "Wrap Lines" checkbox to disabled, THE File_Viewer SHALL display lines without wrapping and enable horizontal scrolling for lines that exceed the visible width
+4. WHEN line wrapping is enabled, THE File_Viewer SHALL preserve the original line numbering such that line N is always labeled as line N regardless of how many visual rows it occupies
+5. WHEN a wrapped line spans multiple visual rows, THE File_Viewer SHALL display the line number only on the first visual row of that line
+6. WHEN line wrapping is enabled, THE vertical scrollbar SHALL continue to represent the total number of logical lines in the file, not the number of visual rows
+7. THE line wrapping state SHALL default to disabled when the application launches
+

@@ -28,9 +28,14 @@ function App() {
   const [isLoading, setIsLoading] = React.useState(false);
   const [error, setError] = React.useState<ErrorInfo | null>(null);
   const [titleBarText, setTitleBarText] = React.useState('Editor');
+  const [wrapLines, setWrapLines] = React.useState(false);
 
   const interopRef = React.useRef<any>(null);
   const lastRequestedStartRef = React.useRef<number>(0);
+
+  const handleWrapLinesChange = React.useCallback((enabled: boolean) => {
+    setWrapLines(enabled);
+  }, []);
 
   const handleRequestLines = React.useCallback((startLine: number, lineCount: number) => {
     if (interopRef.current) {
@@ -99,9 +104,14 @@ function App() {
         linesStartLine,
         isLoading,
         error,
+        wrapLines,
         onRequestLines: handleRequestLines,
       })}
-      {React.createElement(StatusBarComponent, { metadata: fileMeta })}
+      {React.createElement(StatusBarComponent, {
+        metadata: fileMeta,
+        wrapLines,
+        onWrapLinesChange: handleWrapLinesChange,
+      })}
     </div>
   );
 }

@@ -82,3 +82,21 @@
 *For any* valid range (> 0) and viewportSize (> 0), the thumb height SHALL equal `max(MIN_THUMB_HEIGHT, (viewportSize / range) * trackHeight)`, ensuring the thumb is proportional to the viewport's share of the total range while remaining at least the minimum grabbable size.
 
 **Validates: Requirements 10.9**
+
+## Property 14: Line Wrapping State Toggle Idempotence
+
+*For any* application state with a file loaded, toggling the "Wrap Lines" checkbox twice (enabled then disabled, or disabled then enabled) SHALL return the wrapping state to its original value without affecting any other application state (file metadata, visible lines, scroll position, or error state).
+
+**Validates: Requirements 11.2, 11.3**
+
+## Property 15: Logical Line Numbering Preservation with Wrapping
+
+*For any* file content and any visible line range, when line wrapping is enabled, the line number displayed for each logical line SHALL equal its 1-based position in the file, regardless of how many visual rows that line occupies when wrapped.
+
+**Validates: Requirements 11.4**
+
+## Property 16: Vertical Scrollbar Logical Line Representation
+
+*For any* file with totalLines logical lines, the vertical scrollbar range SHALL equal totalLines regardless of the wrapping state, ensuring the scrollbar represents logical lines (not visual rows) whether wrapping is enabled or disabled.
+
+**Validates: Requirements 11.6**
