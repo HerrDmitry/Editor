@@ -1,29 +1,42 @@
 "use strict";
 // CustomScrollbar.tsx — compiled by tsc to wwwroot/js/CustomScrollbar.js
 // No module imports — React is a global from the UMD script.
-function CustomScrollbar({ totalLines, visibleLineCount, currentTopLine, onScrollToLine }) {
+/** Minimum thumb height in pixels to keep it grabbable. */
+const MIN_THUMB_HEIGHT = 20;
+function CustomScrollbar({ range, position, viewportSize, onPositionChange }) {
     const trackRef = React.useRef(null);
     const [isDragging, setIsDragging] = React.useState(false);
-    const dragStartRef = React.useRef({ mouseY: 0, startLine: 0 });
-    // Calculate thumb position and size based on track height
-    const getThumbMetrics = () => {
-        if (!trackRef.current || totalLines <= 0) {
-            return { thumbTop: 0, thumbHeight: 20 };
-        }
-        const trackHeight = trackRef.current.clientHeight;
-        const thumbHeight = Math.max(20, (visibleLineCount / totalLines) * trackHeight);
-        const scrollableTrack = trackHeight - thumbHeight;
-        const maxScrollLine = Math.max(1, totalLines - visibleLineCount);
-        const thumbTop = (currentTopLine / maxScrollLine) * scrollableTrack;
-        return { thumbTop: Math.max(0, Math.min(thumbTop, scrollableTrack)), thumbHeight };
+    const dragStartRef = React.useRef({ mouseY: 0, thumbTopAtStart: 0 });
+    // Suppress onPositionChange during external (programmatic) position updates.
+    // We only call onPositionChange when the user is actively dragging.
+    const isUserDragging = React.useRef(false);
+    // Calculate thumb height proportional to viewport/range ratio.
+    const getThumbHeight = (trackHeight) => {
+        if (range <= 0)
+            return trackHeight;
+        return Math.max(MIN_THUMB_HEIGHT, (viewportSize / (range + viewportSize)) * trackHeight);
     };
-    const { thumbTop, thumbHeight } = getThumbMetrics();
+    // Calculate thumb top position from the current position value.
+    const getThumbTop = (trackHeight, thumbHeight) => {
+        if (range <= 0)
+            return 0;
+        const scrollableTrack = trackHeight - thumbHeight;
+        if (scrollableTrack <= 0)
+            return 0;
+        const fraction = position / range;
+        return Math.max(0, Math.min(fraction * scrollableTrack, scrollableTrack));
+    };
+    // Get current metrics
+    const trackHeight = trackRef.current ? trackRef.current.clientHeight : 0;
+    const thumbHeight = getThumbHeight(trackHeight);
+    const thumbTop = getThumbTop(trackHeight, thumbHeight);
     // Thumb dragging: mousedown on thumb
     const handleThumbMouseDown = (e) => {
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(true);
-        dragStartRef.current = { mouseY: e.clientY, startLine: currentTopLine };
+        isUserDragging.current = true;
+        dragStartRef.current = { mouseY: e.clientY, thumbTopAtStart: thumbTop };
     };
     // Document-level mousemove/mouseup for dragging
     React.useEffect(() => {
@@ -33,20 +46,22 @@ function CustomScrollbar({ totalLines, visibleLineCount, currentTopLine, onScrol
             e.preventDefault();
             if (!trackRef.current)
                 return;
-            const trackHeight = trackRef.current.clientHeight;
-            const thumbH = Math.max(20, (visibleLineCount / totalLines) * trackHeight);
-            const scrollableTrack = trackHeight - thumbH;
+            const currentTrackHeight = trackRef.current.clientHeight;
+            const currentThumbHeight = getThumbHeight(currentTrackHeight);
+            const scrollableTrack = currentTrackHeight - currentThumbHeight;
             if (scrollableTrack <= 0)
                 return;
             const deltaY = e.clientY - dragStartRef.current.mouseY;
-            const maxScrollLine = Math.max(1, totalLines - visibleLineCount);
-            const lineDelta = (deltaY / scrollableTrack) * maxScrollLine;
-            const targetLine = Math.round(dragStartRef.current.startLine + lineDelta);
-            const clamped = Math.max(0, Math.min(targetLine, totalLines - visibleLineCount));
-            onScrollToLine(clamped);
+            const newThumbTop = Math.max(0, Math.min(dragStartRef.current.thumbTopAtStart + deltaY, scrollableTrack));
+            // Calculate position: linear mapping from thumbTop to range
+            const calculatedPosition = (newThumbTop / scrollableTrack) * range;
+            if (onPositionChange) {
+                onPositionChange(calculatedPosition);
+            }
         };
         const handleMouseUp = () => {
             setIsDragging(false);
+            isUserDragging.current = false;
         };
         document.addEventListener('mousemove', handleMouseMove);
         document.addEventListener('mouseup', handleMouseUp);
@@ -54,27 +69,10 @@ function CustomScrollbar({ totalLines, visibleLineCount, currentTopLine, onScrol
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isDragging, totalLines, visibleLineCount, onScrollToLine]);
-    // Track click: page up/down
-    const handleTrackClick = (e) => {
-        if (!trackRef.current)
-            return;
-        const trackRect = trackRef.current.getBoundingClientRect();
-        const clickY = e.clientY - trackRect.top;
-        if (clickY < thumbTop) {
-            // Click above thumb — page up
-            const targetLine = Math.max(0, currentTopLine - visibleLineCount);
-            onScrollToLine(targetLine);
-        }
-        else if (clickY > thumbTop + thumbHeight) {
-            // Click below thumb — page down
-            const targetLine = Math.min(totalLines - visibleLineCount, currentTopLine + visibleLineCount);
-            onScrollToLine(Math.max(0, targetLine));
-        }
-    };
+    }, [isDragging, range, viewportSize, onPositionChange]);
     const thumbClassName = 'custom-scrollbar__thumb' + (isDragging ? ' custom-scrollbar__thumb--active' : '');
     return (React.createElement("div", { className: "custom-scrollbar" },
-        React.createElement("div", { className: "custom-scrollbar__track", ref: trackRef, onClick: handleTrackClick }, React.createElement('div', {
+        React.createElement("div", { className: "custom-scrollbar__track", ref: trackRef }, React.createElement('div', {
             className: thumbClassName,
             style: { top: thumbTop, height: thumbHeight },
             onMouseDown: handleThumbMouseDown,
