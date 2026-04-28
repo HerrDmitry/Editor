@@ -35,6 +35,7 @@ declare namespace React {
   // Hooks
   function useState<S>(initialState: S | (() => S)): [S, Dispatch<SetStateAction<S>>];
   function useEffect(effect: () => void | (() => void), deps?: DependencyList): void;
+  function useLayoutEffect(effect: () => void | (() => void), deps?: DependencyList): void;
   function useCallback<T extends (...args: any[]) => any>(callback: T, deps: DependencyList): T;
   function useRef<T>(initialValue: T): MutableRefObject<T>;
   function useRef<T>(initialValue: T | null): RefObject<T>;
@@ -92,6 +93,12 @@ declare namespace React {
   interface UIEvent<T = Element> extends SyntheticEvent<T> {
   }
 
+  interface WheelEvent<T = Element> extends SyntheticEvent<T> {
+    deltaY: number;
+    deltaX: number;
+    preventDefault(): void;
+  }
+
   // HTML attributes
   interface HTMLAttributes<T> {
     key?: Key;
@@ -105,6 +112,7 @@ declare namespace React {
     onKeyDown?: (event: KeyboardEvent<T>) => void;
     onChange?: (event: ChangeEvent<T>) => void;
     onScroll?: (event: UIEvent<T>) => void;
+    onWheel?: (event: WheelEvent<T>) => void;
     children?: ReactNode;
     'aria-label'?: string;
     'aria-hidden'?: boolean | 'true' | 'false';
@@ -133,7 +141,7 @@ declare namespace JSX {
     h2: React.HTMLAttributes<HTMLHeadingElement>;
     h3: React.HTMLAttributes<HTMLHeadingElement>;
     a: React.HTMLAttributes<HTMLAnchorElement> & { href?: string; target?: string };
-    input: React.HTMLAttributes<HTMLInputElement> & { type?: string; value?: string; placeholder?: string };
+    input: React.HTMLAttributes<HTMLInputElement> & { type?: string; value?: string; placeholder?: string; checked?: boolean; disabled?: boolean };
     label: React.HTMLAttributes<HTMLLabelElement> & { htmlFor?: string };
     ul: React.HTMLAttributes<HTMLUListElement>;
     li: React.HTMLAttributes<HTMLLIElement>;

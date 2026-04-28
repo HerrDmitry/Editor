@@ -111,3 +111,16 @@ interface ErrorInfo {
   details?: string;
 }
 ```
+
+**AppState** (maintained by App component):
+```typescript
+interface AppState {
+  fileMeta: FileMeta | null;
+  lines: string[] | null;
+  linesStartLine: number;
+  isLoading: boolean;
+  error: ErrorInfo | null;
+  titleBarText: string;
+  wrapLines: boolean;  // Line wrapping state (default: false)
+}
+```

@@ -1,11 +1,29 @@
 // ContentArea.tsx — compiled by tsc to wwwroot/js/ContentArea.js
 // No module imports — React is a global from the UMD script.
 
-/** Fixed line height in pixels for virtual scroll calculations. */
+//
+// Sliding-window virtual scroll:
+//   - Container holds up to WINDOW_SIZE rendered lines (real DOM, real heights).
+//   - Viewport clips with overflow:auto → native pixel-smooth scroll.
+//   - When scroll approaches edge, request more lines from backend.
+//   - App merges new lines into buffer (no trim).
+//   - useLayoutEffect trims buffer + adjusts scrollTop before paint → no jump.
+//
+
+/** Max logical lines to keep in the sliding window. */
+const WINDOW_SIZE = 400;
+
+/** When scroll gets within this many pixels of container edge, fetch more. */
+const EDGE_THRESHOLD = 600;
+
+/** Lines to request from backend per fetch. */
+const FETCH_SIZE = 200;
+
+/** Fixed line height for line-number column. */
 const LINE_HEIGHT = 20;
 
-/** Number of extra lines to request beyond the visible viewport. */
-const BUFFER_LINES = 10;
+/** Viewport size for scrollbar thumb sizing (logical lines). */
+const SCROLLBAR_VIEWPORT_SIZE = 50;
 
 interface FileMeta {
   totalLines: number;
@@ -23,87 +41,225 @@ interface ContentAreaProps {
   linesStartLine: number;
   isLoading: boolean;
   error: ErrorInfo | null;
+  wrapLines: boolean;
   onRequestLines: (startLine: number, lineCount: number) => void;
+  onJumpToLine: (startLine: number, lineCount: number) => void;
+  onTrimBuffer: (newStart: number, newLines: string[]) => void;
 }
 
-function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequestLines }: ContentAreaProps) {
+function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLines, onRequestLines, onJumpToLine, onTrimBuffer }: ContentAreaProps) {
+  const viewportRef = React.useRef<HTMLDivElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
-  const lineNumbersRef = React.useRef<HTMLDivElement>(null);
-  const lastRequestedRef = React.useRef<{ startLine: number; lineCount: number }>({ startLine: -1, lineCount: -1 });
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [currentTopLine, setCurrentTopLine] = React.useState(0);
+  const pendingRequestRef = React.useRef(false);
+  const isTrimming = React.useRef(false);
+  const isJumpingRef = React.useRef(false);
+  const jumpTargetLineRef = React.useRef(0);
+  const dragDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Cap spacer height to avoid browser max element height limits (~33M pixels).
-  const MAX_SCROLL_HEIGHT = 10_000_000;
-  const rawTotalHeight = fileMeta ? fileMeta.totalLines * LINE_HEIGHT : 0;
-  const totalHeight = Math.min(rawTotalHeight, MAX_SCROLL_HEIGHT);
-  const scrollScale = rawTotalHeight > MAX_SCROLL_HEIGHT ? rawTotalHeight / MAX_SCROLL_HEIGHT : 1;
+  // Scrollbar position = first visible logical line number
+  const [scrollbarPosition, setScrollbarPosition] = React.useState(0);
 
-  const visibleLineCount = containerRef.current
-    ? Math.ceil(containerRef.current.clientHeight / LINE_HEIGHT)
-    : 50;
+  // Refs for fresh values in callbacks
+  const bufferRef = React.useRef({ start: linesStartLine, count: lines ? lines.length : 0 });
+  bufferRef.current = { start: linesStartLine, count: lines ? lines.length : 0 };
+  const fileMetaRef = React.useRef(fileMeta);
+  fileMetaRef.current = fileMeta;
 
-  // Map native scrollTop to a line number using proportional mapping.
-  // This correctly handles the capped scroll height for large files.
-  const scrollTopToLine = (scrollTop: number, containerHeight: number): number => {
-    if (!fileMeta || totalHeight <= containerHeight) return 0;
-    const maxScrollTop = totalHeight - containerHeight;
-    if (maxScrollTop <= 0) return 0;
-    const scrollFraction = scrollTop / maxScrollTop; // 0..1
-    const maxLine = fileMeta.totalLines - Math.ceil(containerHeight / LINE_HEIGHT);
-    return Math.round(scrollFraction * Math.max(0, maxLine));
-  };
+  // Track previous buffer to detect prepend/append
+  const prevStartRef = React.useRef(linesStartLine);
+  const prevCountRef = React.useRef(lines ? lines.length : 0);
 
-  const lineToScrollTop = (line: number, containerHeight: number): number => {
-    if (!fileMeta || totalHeight <= containerHeight) return 0;
-    const maxScrollTop = totalHeight - containerHeight;
-    if (maxScrollTop <= 0) return 0;
-    const maxLine = fileMeta.totalLines - Math.ceil(containerHeight / LINE_HEIGHT);
-    if (maxLine <= 0) return 0;
-    const scrollFraction = line / maxLine; // 0..1
-    return scrollFraction * maxScrollTop;
-  };
-
-  const handleScrollToLine = React.useCallback((targetLine: number) => {
-    if (!containerRef.current || !fileMeta) return;
-    const clamped = Math.max(0, Math.min(targetLine, fileMeta.totalLines - 1));
-    containerRef.current.scrollTop = lineToScrollTop(clamped, containerRef.current.clientHeight);
-  }, [fileMeta, totalHeight]);
-
-  const handleScroll = React.useCallback(() => {
-    if (!fileMeta || !containerRef.current) return;
-
-    // Sync line numbers vertical scroll with content scroll
-    if (lineNumbersRef.current) {
-      lineNumbersRef.current.scrollTop = containerRef.current.scrollTop;
+  // useLayoutEffect: runs after DOM update, before paint.
+  // Handles scroll adjustment for prepended lines and trimming.
+  React.useLayoutEffect(() => {
+    if (!lines || !viewportRef.current || !containerRef.current) return;
+    if (isTrimming.current) {
+      isTrimming.current = false;
+      return; // This render was caused by our own trim — skip
     }
 
-    // Map scroll position to line number using proportional mapping
-    const visibleStartLine = scrollTopToLine(containerRef.current.scrollTop, containerRef.current.clientHeight);
-    setCurrentTopLine(visibleStartLine);
+    // Jump from scrollbar drag — scroll to target line within the new buffer
+    if (isJumpingRef.current) {
+      isJumpingRef.current = false;
+      const targetLine = jumpTargetLineRef.current;
+      const container = containerRef.current;
+      const viewport = viewportRef.current;
 
-    // Debounce line requests to avoid flooding the backend
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-
-    debounceRef.current = setTimeout(() => {
-      if (!containerRef.current) return;
-
-      const startLine = scrollTopToLine(containerRef.current.scrollTop, containerRef.current.clientHeight);
-      const lineCount = Math.ceil(containerRef.current.clientHeight / LINE_HEIGHT) + BUFFER_LINES;
-
-      const last = lastRequestedRef.current;
-      if (last.startLine === startLine && last.lineCount === lineCount) {
-        return;
+      // Find the target line's DOM element and scroll to it
+      const lineIndex = targetLine - linesStartLine;
+      const lineElements = container.querySelectorAll('.line-container');
+      if (lineIndex >= 0 && lineIndex < lineElements.length) {
+        let targetOffset = 0;
+        for (let i = 0; i < lineIndex; i++) {
+          targetOffset += (lineElements[i] as HTMLElement).offsetHeight;
+        }
+        viewport.scrollTop = targetOffset;
+      } else {
+        viewport.scrollTop = 0;
       }
 
-      lastRequestedRef.current = { startLine, lineCount };
-      onRequestLines(startLine, lineCount);
-    }, 16);
-  }, [fileMeta, onRequestLines, scrollScale]);
+      prevStartRef.current = linesStartLine;
+      prevCountRef.current = lines.length;
+      return;
+    }
 
-  // Loading state
+    const viewport = viewportRef.current;
+    const container = containerRef.current;
+    const prevStart = prevStartRef.current;
+    const newStart = linesStartLine;
+
+    // Lines were prepended (scroll up) — adjust scrollTop by added height
+    if (newStart < prevStart && prevStart > 0) {
+      const prependedCount = prevStart - newStart;
+      const lineElements = container.querySelectorAll('.line-container');
+      let addedHeight = 0;
+      for (let i = 0; i < prependedCount && i < lineElements.length; i++) {
+        addedHeight += (lineElements[i] as HTMLElement).offsetHeight;
+      }
+      viewport.scrollTop += addedHeight;
+    }
+
+    // Trim if buffer exceeds WINDOW_SIZE
+    if (lines.length > WINDOW_SIZE) {
+      const lineElements = container.querySelectorAll('.line-container');
+
+      // Determine scroll direction from which end to trim
+      const scrollTop = viewport.scrollTop;
+      const viewportHeight = viewport.clientHeight;
+      const containerHeight = container.scrollHeight;
+      const distToBottom = containerHeight - scrollTop - viewportHeight;
+
+      if (distToBottom > scrollTop) {
+        // Closer to top → trim from bottom (user scrolled up, excess at bottom)
+        const trimCount = lines.length - WINDOW_SIZE;
+        const newLines = lines.slice(0, WINDOW_SIZE);
+        isTrimming.current = true;
+        onTrimBuffer(linesStartLine, newLines);
+      } else {
+        // Closer to bottom → trim from top
+        const trimCount = lines.length - WINDOW_SIZE;
+        // Measure height of lines being removed from top
+        let removedHeight = 0;
+        for (let i = 0; i < trimCount && i < lineElements.length; i++) {
+          removedHeight += (lineElements[i] as HTMLElement).offsetHeight;
+        }
+        const newLines = lines.slice(trimCount);
+        const newStartLine = linesStartLine + trimCount;
+        // Adjust scroll BEFORE React re-renders (we're in useLayoutEffect)
+        viewport.scrollTop -= removedHeight;
+        isTrimming.current = true;
+        onTrimBuffer(newStartLine, newLines);
+      }
+    }
+
+    prevStartRef.current = linesStartLine;
+    prevCountRef.current = lines.length;
+  }, [linesStartLine, lines, onTrimBuffer]);
+
+  // Scroll handler: detect edge proximity, request more lines, update scrollbar
+  const handleScroll = React.useCallback(() => {
+    const viewport = viewportRef.current;
+    const container = containerRef.current;
+    const meta = fileMetaRef.current;
+    if (!viewport || !container || !meta) return;
+
+    const scrollTop = viewport.scrollTop;
+    const viewportHeight = viewport.clientHeight;
+    const containerHeight = container.scrollHeight;
+    const buf = bufferRef.current;
+
+    // Compute first visible logical line by finding which line-container
+    // is at the current scrollTop position.
+    const lineElements = container.querySelectorAll('.line-container');
+    let accHeight = 0;
+    let firstVisibleLine = buf.start;
+    for (let i = 0; i < lineElements.length; i++) {
+      const h = (lineElements[i] as HTMLElement).offsetHeight;
+      if (accHeight + h > scrollTop) {
+        firstVisibleLine = buf.start + i;
+        break;
+      }
+      accHeight += h;
+    }
+    setScrollbarPosition(firstVisibleLine);
+
+    // Near bottom edge
+    const distToBottom = containerHeight - scrollTop - viewportHeight;
+    if (distToBottom < EDGE_THRESHOLD) {
+      const bufferEnd = buf.start + buf.count;
+      if (bufferEnd < meta.totalLines && !pendingRequestRef.current) {
+        pendingRequestRef.current = true;
+        const startLine = Math.max(0, bufferEnd - 20);
+        const count = Math.min(FETCH_SIZE, meta.totalLines - startLine);
+        onRequestLines(startLine, count);
+      }
+    }
+
+    // Near top edge
+    if (scrollTop < EDGE_THRESHOLD) {
+      if (buf.start > 0 && !pendingRequestRef.current) {
+        pendingRequestRef.current = true;
+        const startLine = Math.max(0, buf.start - FETCH_SIZE + 20);
+        const count = Math.min(FETCH_SIZE, buf.start - startLine + 20);
+        onRequestLines(startLine, count);
+      }
+    }
+  }, [onRequestLines]);
+
+  // Scrollbar thumb drag → jump to line (debounced).
+  // Only fires the backend request after drag settles (150ms).
+  // Scrollbar thumb moves immediately (CustomScrollbar handles that internally).
+  const handleScrollbarDrag = React.useCallback((pos: number) => {
+    const meta = fileMetaRef.current;
+    if (!meta) return;
+    const targetLine = Math.max(0, Math.min(Math.round(pos), meta.totalLines - 1));
+
+    // Update scrollbar position immediately for visual feedback
+    setScrollbarPosition(targetLine);
+
+    // If target is already in the buffer, scroll to it locally — no backend request
+    const buf = bufferRef.current;
+    if (buf.count > 0 && targetLine >= buf.start && targetLine < buf.start + buf.count) {
+      const container = containerRef.current;
+      const viewport = viewportRef.current;
+      if (container && viewport) {
+        const lineIndex = targetLine - buf.start;
+        const lineElements = container.querySelectorAll('.line-container');
+        if (lineIndex >= 0 && lineIndex < lineElements.length) {
+          let targetOffset = 0;
+          for (let i = 0; i < lineIndex; i++) {
+            targetOffset += (lineElements[i] as HTMLElement).offsetHeight;
+          }
+          viewport.scrollTop = targetOffset;
+        }
+      }
+      return;
+    }
+
+    // Target outside buffer — debounce backend request
+    if (dragDebounceRef.current) {
+      clearTimeout(dragDebounceRef.current);
+    }
+
+    dragDebounceRef.current = setTimeout(() => {
+      const halfWindow = Math.floor(FETCH_SIZE / 2);
+      const startLine = Math.max(0, targetLine - halfWindow);
+      const count = Math.min(FETCH_SIZE, meta.totalLines - startLine);
+
+      jumpTargetLineRef.current = targetLine;
+      isJumpingRef.current = true;
+      pendingRequestRef.current = true;
+      onJumpToLine(startLine, count);
+    }, 150);
+  }, [onJumpToLine]);
+
+  // Clear pending flag when new data arrives.
+  React.useEffect(() => {
+    pendingRequestRef.current = false;
+  }, [linesStartLine, lines]);
+
+  // --- Early returns (after all hooks) ---
+
   if (isLoading) {
     return (
       <div className="content-area content-area--centered">
@@ -115,7 +271,6 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequ
     );
   }
 
-  // Error state
   if (error) {
     return (
       <div className="content-area content-area--centered">
@@ -127,7 +282,6 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequ
     );
   }
 
-  // Empty state — no file loaded
   if (!fileMeta) {
     return (
       <div className="content-area content-area--centered">
@@ -136,63 +290,48 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, onRequ
     );
   }
 
-  // Calculate the position for the visible lines
-  const linesPixelOffset = fileMeta ? lineToScrollTop(linesStartLine, containerRef.current?.clientHeight || 800) : 0;
-  const renderedLinesHeight = lines ? lines.length * LINE_HEIGHT : 0;
-  const maxOffset = Math.max(0, totalHeight - renderedLinesHeight);
-  const clampedOffset = Math.max(0, Math.min(linesPixelOffset, maxOffset));
-
   return (
     <div className="content-area content-area--virtual" style={{ display: 'flex', flexDirection: 'row' }}>
-      {/* Line numbers column — scrolls vertically only, never horizontally */}
-      <div
-        className="line-numbers-column"
-        ref={lineNumbersRef}
-        style={{ overflowY: 'hidden', overflowX: 'hidden', flexShrink: 0, width: 60 }}
-      >
-        <div style={{ height: totalHeight, position: 'relative' }}>
-          {lines && (
-            <div style={{ position: 'absolute', top: clampedOffset, left: 0, right: 0 }}>
-              {lines.map((_: string, index: number) => (
-                <div
-                  key={linesStartLine + index}
-                  className="line-number-row"
-                  style={{ height: LINE_HEIGHT, lineHeight: LINE_HEIGHT + 'px', textAlign: 'right', paddingRight: 12 }}
-                >
-                  {linesStartLine + index + 1}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-      {/* Content column — scrolls both vertically and horizontally */}
       <div
         className="content-column content-column--hidden-scrollbar"
-        ref={containerRef}
+        ref={viewportRef}
         onScroll={handleScroll}
-        style={{ overflowY: 'auto', overflowX: 'auto', flex: 1, minWidth: 0 }}
+        style={{ overflowY: 'auto', overflowX: wrapLines ? 'hidden' : 'auto', flex: 1, minWidth: 0 }}
       >
-        <div style={{ height: totalHeight, position: 'relative' }}>
-          {lines && (
-            <div style={{ position: 'absolute', top: clampedOffset, left: 0 }}>
-              {lines.map((line: string, index: number) => (
-                <pre
-                  key={linesStartLine + index}
-                  className="content-line"
-                  style={{ height: LINE_HEIGHT, lineHeight: LINE_HEIGHT + 'px', margin: 0 }}
-                >{line}</pre>
-              ))}
+        <div ref={containerRef}>
+          {lines && lines.map((line: string, index: number) => (
+            <div
+              key={linesStartLine + index}
+              className="line-container"
+              style={{ display: 'flex', flexDirection: 'row', minHeight: LINE_HEIGHT }}
+            >
+              <div
+                className="line-number-row"
+                style={{
+                  flexShrink: 0, width: 60, textAlign: 'right', paddingRight: 12,
+                  alignSelf: 'flex-start', height: LINE_HEIGHT, lineHeight: `${LINE_HEIGHT}px`,
+                }}
+              >
+                {linesStartLine + index + 1}
+              </div>
+              <pre
+                className="content-line"
+                style={{
+                  whiteSpace: wrapLines ? 'pre-wrap' : 'pre',
+                  margin: 0, flex: 1, minWidth: 0,
+                  wordBreak: wrapLines ? 'break-all' : 'normal',
+                }}
+              >{line}</pre>
             </div>
-          )}
+          ))}
         </div>
       </div>
-      {/* Custom scrollbar column */}
       {React.createElement((window as any).CustomScrollbar, {
-        range: fileMeta.totalLines - visibleLineCount,
-        position: currentTopLine,
-        viewportSize: visibleLineCount,
-        onPositionChange: (pos: number) => handleScrollToLine(Math.round(pos)),
+        key: 'scrollbar',
+        range: fileMeta.totalLines,
+        position: scrollbarPosition,
+        viewportSize: SCROLLBAR_VIEWPORT_SIZE,
+        onPositionChange: handleScrollbarDrag,
       })}
     </div>
   );

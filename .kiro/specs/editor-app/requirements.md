@@ -29,6 +29,8 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 - **Line_Index**: A data structure maintained by the Backend that maps line numbers to byte offsets in the file, enabling O(1) seeking to any line without loading the entire file
 - **Visible_Range**: The range of line numbers currently visible in the Content_Area, determined by the scroll position and viewport height
 - **Virtual_Scrollbar**: A generic, reusable custom scrollbar component driven by two abstract numeric parameters (range and position) with no awareness of what the values represent, providing clean separation between external position updates (no events) and user-initiated thumb drags (which calculate and report position)
+- **Line_Buffer**: The set of lines currently held in memory by the Content_Area, fetched from the Backend on demand and merged with existing buffered lines on append requests. The buffer is trimmed by the sliding window mechanism when it exceeds WINDOW_SIZE, with scroll position compensation to prevent visual jumps
+- **Sliding_Window**: The technique of maintaining a fixed-size window (WINDOW_SIZE = 400) of rendered DOM lines in the Content_Area. The viewport clips the container with `overflow-y: auto` for native pixel-smooth scrolling. When scroll approaches the container edge, more lines are fetched and merged into the buffer. A `useLayoutEffect` trims excess lines from the buffer edges, adjusting `scrollTop` by the exact measured height of removed lines to prevent visual jumps. No spacer div, no fake height, no proportional mapping — works identically for wrap and non-wrap modes
 
 ## Requirements
 
@@ -65,12 +67,13 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 1. WHEN a file is successfully opened, THE File_Viewer SHALL display the text content visible at the current scroll position in the Content_Area
 2. WHEN a file is successfully opened, THE File_Viewer SHALL display line numbers alongside each visible line of text
 3. THE File_Viewer SHALL render file contents using a monospaced font
-4. THE Content_Area SHALL provide a vertical scrollbar that represents the full extent of the file, allowing the user to scroll to any position in the file
-5. WHEN the user scrolls, THE Backend SHALL stream the text content for the newly visible line range and send it to the File_Viewer
-6. WHEN the file contents contain lines wider than the visible area, THE Content_Area SHALL provide horizontal scrolling to access the full line width
+4. THE Content_Area SHALL provide a custom vertical scrollbar that represents the full extent of the file in logical line space, allowing the user to navigate to any position in the file
+5. WHEN the user scrolls via mouse wheel or trackpad, THE Content_Area SHALL scroll smoothly at pixel granularity regardless of whether line wrapping is enabled or disabled
+6. WHEN the file contents contain lines wider than the visible area and line wrapping is disabled, THE Content_Area SHALL provide horizontal scrolling to access the full line width
 7. THE File_Viewer SHALL preserve the original line endings and whitespace of the file contents
-8. THE Backend SHALL only hold the currently visible portion of the file in memory, not the entire file
+8. THE Backend SHALL only hold the currently requested portion of the file in memory, not the entire file
 9. WHEN the user scrolls horizontally, THE line numbers column SHALL remain fixed (sticky) on the left side and always visible
+10. THE Content_Area SHALL use a single unified rendering path for both wrapped and non-wrapped modes, differing only in CSS styling applied to line containers
 
 ### Requirement 4: Title Bar File Indication
 
@@ -149,11 +152,46 @@ A cross-platform desktop editor application built with C# .NET 10 and Photino.Bl
 1. THE Virtual_Scrollbar SHALL accept exactly two input parameters: range (a numeric value representing the total scrollable extent) and position (a numeric value representing the current offset within that range)
 2. THE Virtual_Scrollbar SHALL display a vertical track and a draggable thumb
 3. THE Virtual_Scrollbar SHALL treat range and position as abstract numeric values with no awareness of what they represent (lines, pixels, columns, or any other unit)
-4. WHEN the position is updated externally (programmatic update), THE Virtual_Scrollbar SHALL move the thumb to the corresponding location without emitting any position-change event
-5. WHEN the user drags the thumb, THE Virtual_Scrollbar SHALL calculate and report a position value relative to the range, the thumb size, and the thumb location within the track
+4. WHEN the position prop is updated externally (programmatic update), THE Virtual_Scrollbar SHALL move the thumb to the corresponding location without emitting any position-change event, ensuring no feedback loop back to the initiator
+5. WHEN the user drags the thumb, THE Virtual_Scrollbar SHALL calculate and report a position value relative to the range, the thumb size, and the thumb location within the track via the onPositionChange callback
 6. WHEN the thumb is at the very top of the track, THE Virtual_Scrollbar SHALL report a position of 0
 7. WHEN the thumb is at the very bottom of the track, THE Virtual_Scrollbar SHALL report a position equal to range
 8. WHEN the center of the thumb is at the vertical center of the track, THE Virtual_Scrollbar SHALL report a position equal to range / 2
 9. THE Virtual_Scrollbar thumb size SHALL be proportional to the viewport size relative to the total range (e.g. if viewport represents 50 units out of 10,000 total, the thumb occupies 0.5% of the track)
 10. THE Virtual_Scrollbar SHALL be a self-contained, reusable component with no dependencies on the Content_Area, Backend, or any other application-specific component
+11. WHEN the Content_Area reports a new absolute line position due to mouse wheel or trackpad scrolling, THE Content_Area SHALL update the Virtual_Scrollbar position prop, and THE Virtual_Scrollbar SHALL NOT emit any position-change event back to the Content_Area
+12. WHEN the user drags the Virtual_Scrollbar thumb to a new position, THE Virtual_Scrollbar SHALL report the position via onPositionChange, and THE Content_Area SHALL scroll to the corresponding absolute line position without triggering a scroll event back to the Virtual_Scrollbar
+
+### Requirement 11: Line Wrapping
+
+**User Story:** As a user, I want to wrap long lines to fit within the visible area, so that I can read content without horizontal scrolling.
+
+#### Acceptance Criteria
+
+1. THE Status_Bar SHALL display a checkbox control labeled "Wrap Lines"
+2. WHEN the user toggles the "Wrap Lines" checkbox to enabled, THE File_Viewer SHALL wrap lines that exceed the visible width of the Content_Area by applying CSS wrapping styles to the same line containers used in non-wrap mode
+3. WHEN the user toggles the "Wrap Lines" checkbox to disabled, THE File_Viewer SHALL display lines without wrapping and enable horizontal scrolling for lines that exceed the visible width
+4. WHEN line wrapping is enabled, THE File_Viewer SHALL preserve the original line numbering such that line N is always labeled as line N regardless of how many visual rows it occupies
+5. WHEN a wrapped line spans multiple visual rows, THE File_Viewer SHALL display the line number only on the first visual row of that line
+6. WHEN line wrapping is enabled, THE Virtual_Scrollbar SHALL continue to represent the total number of logical lines in the file, not the number of visual rows
+7. THE line wrapping state SHALL default to disabled when the application launches
+8. WHEN line wrapping is toggled, THE Content_Area SHALL switch between wrapped and non-wrapped display using only CSS style changes on the existing DOM structure, without switching to a different rendering code path
+
+### Requirement 12: Unified Scrolling and Buffer Management
+
+**User Story:** As a user, I want smooth, consistent scrolling behavior regardless of display mode, so that navigating large files feels responsive and predictable whether lines are wrapped or not.
+
+#### Acceptance Criteria
+
+1. THE Content_Area SHALL maintain a sliding window buffer of up to WINDOW_SIZE (400) rendered DOM lines, larger than the visible viewport
+2. WHEN the scroll position approaches the top or bottom edge of the container (within EDGE_THRESHOLD = 600px), THE Content_Area SHALL request additional lines (FETCH_SIZE = 200) from the Backend before the edge is reached
+3. THE Content_Area SHALL use a sliding window of real DOM lines with native browser scrolling (`overflow-y: auto`) as the single scrolling mechanism for both wrapped and non-wrapped modes — no spacer div, no fake height
+4. WHEN the user scrolls via mouse wheel or trackpad, THE Content_Area SHALL delegate to the browser's native scroll handling to achieve pixel-smooth scrolling
+5. THE Content_Area SHALL NOT implement manual wheel-delta-to-line-jump translation for any display mode
+6. WHEN the native scroll position changes, THE Content_Area SHALL determine the first visible logical line by walking DOM line-container elements and accumulating heights against scrollTop, then update the Virtual_Scrollbar position prop directly without triggering any callback from the Virtual_Scrollbar
+7. WHEN new lines arrive from the Backend in response to edge-proximity requests, THE App SHALL merge them into the existing buffer (not replace it)
+8. WHEN the buffer exceeds WINDOW_SIZE after a merge, THE Content_Area SHALL trim excess lines via `useLayoutEffect`: trimming from top adjusts `scrollTop` by the exact measured height of removed lines; trimming from bottom requires no scroll adjustment. This prevents visual jumps
+9. WHEN the user drags the Virtual_Scrollbar thumb and the target line is within the current buffer, THE Content_Area SHALL scroll locally by measuring DOM heights — no backend request
+10. WHEN the user drags the Virtual_Scrollbar thumb and the target line is outside the current buffer, THE Content_Area SHALL issue a debounced (150ms) jump request that replaces the buffer entirely (not merge), then `useLayoutEffect` measures DOM to find the target line offset and sets scrollTop
+11. THE Content_Area SHALL use a single scrollbar interaction handler for both wrapped and non-wrapped modes
 

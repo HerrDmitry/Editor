@@ -9,6 +9,8 @@ interface FileMeta {
 
 interface StatusBarProps {
   metadata: FileMeta | null | undefined;
+  wrapLines: boolean;
+  onWrapLinesChange: (enabled: boolean) => void;
 }
 
 /**
@@ -28,7 +30,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-function StatusBar({ metadata }: StatusBarProps) {
+function StatusBar({ metadata, wrapLines, onWrapLinesChange }: StatusBarProps) {
   return (
     <div className="status-bar" role="contentinfo">
       {metadata ? (
@@ -40,6 +42,15 @@ function StatusBar({ metadata }: StatusBarProps) {
           <span className="status-bar__item">{metadata.encoding}</span>
         </div>
       ) : null}
+      <label className="status-bar__wrap-toggle">
+        <input
+          type="checkbox"
+          className="status-bar__wrap-checkbox"
+          checked={wrapLines}
+          onChange={(e) => onWrapLinesChange(e.target.checked)}
+        />
+        Wrap Lines
+      </label>
     </div>
   );
 }
