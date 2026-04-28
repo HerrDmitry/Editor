@@ -35,6 +35,7 @@ declare namespace React {
   // Hooks
   function useState<S>(initialState: S | (() => S)): [S, Dispatch<SetStateAction<S>>];
   function useEffect(effect: () => void | (() => void), deps?: DependencyList): void;
+  function useLayoutEffect(effect: () => void | (() => void), deps?: DependencyList): void;
   function useCallback<T extends (...args: any[]) => any>(callback: T, deps: DependencyList): T;
   function useRef<T>(initialValue: T): MutableRefObject<T>;
   function useRef<T>(initialValue: T | null): RefObject<T>;

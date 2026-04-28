@@ -23,6 +23,7 @@ The implementation is split into 8 phases, each in its own file:
 11. **[tasks/11-unit-tests.md](./tasks/11-unit-tests.md)** - Unit tests and property-based tests for backend services
 12. **[tasks/12-custom-scrollbar.md](./tasks/12-custom-scrollbar.md)** - Custom scrollbar bound to line numbers
 13. **[tasks/13-line-wrapping.md](./tasks/13-line-wrapping.md)** - Line wrapping toggle with logical line numbering preservation
+14. **[tasks/14-unified-scrolling.md](./tasks/14-unified-scrolling.md)** - Unified scrolling and rendering refactor (replaces dual-branch rendering with single path)
 
 See **[tasks/README.md](./tasks/README.md)** for detailed information about the task organization, implementation approach, and property-based testing strategy.
 
@@ -43,6 +44,7 @@ The implementation follows an incremental approach:
 11. **Unit Tests** → Comprehensive backend testing with property-based tests
 12. **Custom Scrollbar** → Line-based scrollbar for precise navigation
 13. **Line Wrapping** → Toggle line wrapping with logical line numbering
+14. **Unified Scrolling** → Refactor to single rendering path, native scrolling for all modes, scroll suppression
 
 ## Getting Started
 
@@ -54,4 +56,4 @@ Start with **[tasks/01-infrastructure.md](./tasks/01-infrastructure.md)** and wo
 - Each task references specific requirements for traceability
 - Checkpoints ensure incremental validation at logical breaks
 - Property tests validate universal correctness properties from the design document
-- The implementation includes 16 correctness properties validated through property-based testing
+- The implementation includes 22 correctness properties validated through property-based testing

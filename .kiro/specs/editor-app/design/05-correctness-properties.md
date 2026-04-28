@@ -32,11 +32,9 @@
 
 **Validates: Requirements 3.2**
 
-## Property 6: Virtual Scrollbar Height
+## ~~Property 6: Virtual Scrollbar Height~~ (Removed)
 
-*For any* totalLines value and a fixed lineHeight, the virtual scroll spacer element's height SHALL equal totalLines × lineHeight pixels, ensuring the scrollbar accurately represents the full extent of the file.
-
-**Validates: Requirements 3.4, 6.6**
+*Removed — the sliding window architecture no longer uses a spacer element. There is no fake height div. The CustomScrollbar range is set to `totalLines` directly.*
 
 ## Property 7: Title Bar Format Consistency
 
@@ -100,3 +98,43 @@
 *For any* file with totalLines logical lines, the vertical scrollbar range SHALL equal totalLines regardless of the wrapping state, ensuring the scrollbar represents logical lines (not visual rows) whether wrapping is enabled or disabled.
 
 **Validates: Requirements 11.6**
+
+## Property 17: Unified Rendering Path
+
+*For any* set of lines and *for any* wrapLines boolean value, the ContentArea SHALL produce the same DOM structure (same element count, same element types, same class names) in both wrapped and non-wrapped modes. Only CSS style properties (whiteSpace, overflowX, wordBreak) SHALL differ between the two modes.
+
+**Validates: Requirements 3.10, 11.8**
+
+## Property 18: Native Scrolling in All Modes (Sliding Window)
+
+*For any* wrapLines boolean value, the ContentArea viewport div SHALL have `overflow-y: auto` and SHALL NOT have any `onWheel` handler that calls `preventDefault` or translates wheel deltas to line jumps. The viewport contains real DOM lines (up to WINDOW_SIZE = 400) — no spacer div, no fake height. This ensures pixel-smooth native browser scrolling in both wrapped and non-wrapped modes.
+
+**Validates: Requirements 3.5, 12.3, 12.4, 12.5**
+
+## Property 19: Scroll-to-Scrollbar Unidirectional Flow
+
+*For any* valid scrollTop value within the scroll container, when a native scroll event occurs (from mouse wheel or trackpad), the ContentArea SHALL update the CustomScrollbar `position` prop to the corresponding line number, and the CustomScrollbar SHALL NOT call `onPositionChange` in response to this prop update.
+
+**Validates: Requirements 10.11, 12.7**
+
+## Property 20: Scrollbar-Drag Scroll Suppression
+
+*For any* valid line position reported by a CustomScrollbar thumb drag via `onPositionChange`, the ContentArea SHALL programmatically set the scroll container's `scrollTop` to the corresponding pixel offset AND suppress the resulting `onScroll` event handler from updating the scrollbar position, preventing a feedback loop.
+
+**Validates: Requirements 10.12, 12.8**
+
+## ~~Property 21: Proportional Mapping Round-Trip~~ (Removed)
+
+*Removed — the sliding window architecture no longer uses proportional mapping (`lineToScrollTop` / `scrollTopToLine`). Line positions are determined by walking DOM elements and measuring actual heights. No mathematical mapping between scrollTop and line numbers exists.*
+
+## Property 22: Buffer Merge on Append
+
+*For any* existing buffer (linesStartLine, lines[]) and *for any* new `LinesResponse` from the Backend triggered by edge-proximity scrolling (not a jump request), the App SHALL merge the new lines into the existing buffer such that the merged buffer covers the union of both ranges. The merged buffer SHALL contain all lines from both the previous buffer and the new response, with new lines overwriting any overlap.
+
+**Validates: Requirements 12.1, 12.2, 12.7**
+
+## Property 23: Sliding Window Trim Stability
+
+*For any* buffer that exceeds WINDOW_SIZE (400 lines) after a merge, when `useLayoutEffect` trims lines from the top of the buffer, the ContentArea SHALL adjust `scrollTop` by the exact sum of `offsetHeight` values of the removed DOM `.line-container` elements. This ensures the visible content does not shift — the user sees no visual jump despite the DOM mutation. When trimming from the bottom, no `scrollTop` adjustment is needed.
+
+**Validates: Requirements 12.1, 12.8**

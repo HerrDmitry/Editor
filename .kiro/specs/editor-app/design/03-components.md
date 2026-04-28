@@ -106,20 +106,37 @@ public interface IKeyboardShortcutHandler
 
 ### 1. App Component
 
-**Responsibility**: Root component managing application state and layout structure.
+**Responsibility**: Root component managing application state, buffer management, and layout structure.
 
 **State**:
 ```typescript
 interface AppState {
   fileMeta: FileMeta | null;       // metadata from FileOpenedResponse
-  lines: string[] | null;          // currently visible lines from LinesResponse
-  linesStartLine: number;          // the startLine of the current lines buffer
+  lines: string[] | null;          // current line buffer (sliding window)
+  linesStartLine: number;          // first logical line number in the buffer
   isLoading: boolean;              // true during initial file scan
   error: ErrorInfo | null;
   titleBarText: string;
   wrapLines: boolean;              // line wrapping state (default: false)
 }
 ```
+
+**Refs**:
+- `linesRef` / `linesStartRef` — track current buffer for async merge callback
+- `isJumpRequestRef` — distinguishes merge (append) from replace (jump) in `onLinesResponse`
+
+**Buffer Management**:
+
+The App component owns the line buffer and implements two distinct response strategies:
+
+1. **Merge (edge-proximity scroll)**: When `onLinesResponse` fires and `isJumpRequestRef` is false, new lines are merged with the existing buffer. The merged array covers the union of both ranges, with new lines overwriting any overlap. No trimming happens here — ContentArea handles that after measuring DOM.
+
+2. **Replace (scrollbar jump)**: When `isJumpRequestRef` is true, the buffer is replaced entirely with the new response. This is used when the user drags the scrollbar thumb to a position outside the current buffer.
+
+**Callbacks**:
+- `handleRequestLines(startLine, lineCount)` — sends `RequestLinesMessage` to backend (for edge-proximity fetches)
+- `handleJumpToLine(startLine, lineCount)` — sets `isJumpRequestRef = true`, then sends `RequestLinesMessage` (for scrollbar jumps outside buffer)
+- `handleTrimBuffer(newStart, newLines)` — called by ContentArea after it measures DOM heights and trims the buffer; updates `linesStartLine` and `lines` state
 
 **Layout Structure**:
 ```tsx
@@ -133,6 +150,8 @@ interface AppState {
     error={error}
     wrapLines={wrapLines}
     onRequestLines={handleRequestLines}
+    onJumpToLine={handleJumpToLine}
+    onTrimBuffer={handleTrimBuffer}
   />
   <StatusBar 
     metadata={fileMeta}
@@ -141,6 +160,8 @@ interface AppState {
   />
 </div>
 ```
+
+**Initial Request**: On `FileOpenedResponse`, App requests 200 lines (not 50) to fill the initial buffer generously.
 
 ### 2. TitleBar Component
 
@@ -159,7 +180,7 @@ interface TitleBarProps {
 
 ### 3. ContentArea Component
 
-**Responsibility**: Display file contents with virtual scrolling, line numbers, custom scrollbar, and loading/error states. Only the lines currently visible in the viewport are rendered.
+**Responsibility**: Display file contents with sliding-window virtual scrolling, line numbers, custom scrollbar, buffer trim logic, and loading/error states. Uses a single unified rendering path for both wrapped and non-wrapped modes, with native browser scrolling in all modes.
 
 **Props**:
 ```typescript
@@ -171,100 +192,223 @@ interface ContentAreaProps {
   error: ErrorInfo | null;
   wrapLines: boolean;
   onRequestLines: (startLine: number, lineCount: number) => void;
+  onJumpToLine: (startLine: number, lineCount: number) => void;
+  onTrimBuffer: (newStart: number, newLines: string[]) => void;
 }
+```
+
+**Constants**:
+```typescript
+const WINDOW_SIZE = 400;              // Max logical lines in sliding window
+const EDGE_THRESHOLD = 600;           // Pixels from edge to trigger fetch
+const FETCH_SIZE = 200;               // Lines to request per fetch
+const LINE_HEIGHT = 20;               // Fixed height for line-number column
+const SCROLLBAR_VIEWPORT_SIZE = 50;   // Viewport size for scrollbar thumb sizing
 ```
 
 **Rendering Modes**:
 - **Empty State**: No file open → Display prompt message "Press Ctrl+O to open a file"
 - **Loading State**: File being scanned → Display spinner with "Scanning file..."
 - **Error State**: Error occurred → Display error message with icon
-- **Content State**: File metadata received → Three-column virtual-scrolling layout
+- **Content State**: File metadata received → Sliding-window layout with custom scrollbar
 
-**Three-Column Layout**:
+**Unified Layout (Single Rendering Path)**:
+
+There is ONE rendering path for content state. The only difference between wrap and non-wrap modes is CSS styling applied to the same DOM structure. There are NO separate `if (wrapLines) { ... } else { ... }` render branches.
 
 ```
-┌────────┬──────────────────────────┬───────────┐
-│ Line   │ Content Column           │ Custom    │
-│ Numbers│ (native scroll hidden)   │ Scrollbar │
-│ (60px) │ (flex)                   │ (14px)    │
-└────────┴──────────────────────────┴───────────┘
+┌──────────────────────────────────────────┬───────────┐
+│ Viewport (overflow-y: auto)              │ Custom    │
+│ ┌──────────────────────────────────────┐ │ Scrollbar │
+│ │ Container (real DOM lines)           │ │ (14px)    │
+│ │ ┌────────┬─────────────────────────┐ │ │           │
+│ │ │ Line   │ Content Column          │ │ │           │
+│ │ │ Numbers│                         │ │ │           │
+│ │ │ (60px) │                         │ │ │           │
+│ │ └────────┴─────────────────────────┘ │ │           │
+│ └──────────────────────────────────────┘ │           │
+└──────────────────────────────────────────┴───────────┘
 ```
 
-1. **Line numbers column** (60px): Synced vertically with content, no horizontal scroll
-2. **Content column** (flex): Native scrollbar hidden via CSS, handles wheel/trackpad input
-3. **Custom scrollbar** (14px): Operates in line space, reflects current position
+The viewport div has `overflow-y: auto` and clips the container. The container holds up to WINDOW_SIZE (400) real DOM line elements. No spacer div, no fake height. The custom scrollbar sits outside the viewport.
 
-**Virtual Scrolling with Capped Height**:
+**Sliding Window DOM Structure**:
 
-Browsers cap element heights at ~33 million pixels. For files with more than ~1.6M lines (at 20px/line), the spacer would exceed this. The spacer height is capped at 10 million pixels.
+```tsx
+// SINGLE render path — no branching on wrapLines
+<div className="content-area content-area--virtual" style={{ display: 'flex', flexDirection: 'row' }}>
+  <div
+    className="content-column content-column--hidden-scrollbar"
+    ref={viewportRef}
+    onScroll={handleScroll}
+    style={{ overflowY: 'auto', overflowX: wrapLines ? 'hidden' : 'auto', flex: 1, minWidth: 0 }}
+  >
+    <div ref={containerRef}>
+      {lines && lines.map((line, index) => (
+        <div key={linesStartLine + index} className="line-container"
+             style={{ display: 'flex', flexDirection: 'row', minHeight: LINE_HEIGHT }}>
+          <div className="line-number-row"
+               style={{ flexShrink: 0, width: 60, textAlign: 'right', paddingRight: 12,
+                        alignSelf: 'flex-start', height: LINE_HEIGHT, lineHeight: `${LINE_HEIGHT}px` }}>
+            {linesStartLine + index + 1}
+          </div>
+          <pre className="content-line"
+               style={{ whiteSpace: wrapLines ? 'pre-wrap' : 'pre', margin: 0, flex: 1,
+                        minWidth: 0, wordBreak: wrapLines ? 'break-all' : 'normal' }}>
+            {line}
+          </pre>
+        </div>
+      ))}
+    </div>
+  </div>
+  <CustomScrollbar
+    range={fileMeta.totalLines}
+    position={scrollbarPosition}
+    viewportSize={SCROLLBAR_VIEWPORT_SIZE}
+    onPositionChange={handleScrollbarDrag}
+  />
+</div>
+```
 
-**Proportional Scroll Mapping**:
+Key points:
+- `wrapLines` only affects CSS properties (`whiteSpace`, `overflowX`, `wordBreak`) — never the DOM structure or code path
+- Line numbers and content are always in the same `line-container` flex row
+- Line numbers use `alignSelf: 'flex-start'` so they stay at the top when content wraps to multiple visual rows
+- No spacer div, no absolute positioning, no `totalHeight` calculation
+- **Validates: Requirements 3.10, 11.8**
 
-Since the spacer height is capped, a simple `scrollTop * scale / LINE_HEIGHT` mapping fails to reach the last line. Instead, use proportional mapping:
+**Sliding Window Architecture**:
+
+The sliding window replaces the old spacer-based virtual scrolling approach:
+
+- **No spacer div**: The container holds real DOM lines. The viewport clips with `overflow-y: auto` → native pixel-smooth scroll.
+- **No proportional mapping**: Line positions are determined by walking DOM `.line-container` elements and measuring actual `offsetHeight` values.
+- **No height cap**: Since there's no fake height element, browser element height limits are irrelevant.
+- **Works identically for wrap and non-wrap**: Same DOM, just CSS. Wrapped lines are taller but the sliding window handles variable heights naturally.
+
+**Edge-Proximity Fetching**:
+
+The `handleScroll` callback checks distance to container edges:
+- Near bottom (`containerHeight - scrollTop - viewportHeight < EDGE_THRESHOLD`): request FETCH_SIZE lines starting from buffer end
+- Near top (`scrollTop < EDGE_THRESHOLD`): request FETCH_SIZE lines before buffer start
+- A `pendingRequestRef` prevents duplicate requests until new data arrives
+
+**`useLayoutEffect` — Trim and Scroll Adjustment**:
+
+Runs after DOM update, before paint. Handles three scenarios:
+
+1. **Prepend (scroll up)**: New lines added before existing buffer → measure added height → `scrollTop += addedHeight` → no visual jump
+
+2. **Buffer exceeds WINDOW_SIZE**: After merge, buffer may exceed 400 lines. Trim logic:
+   - Closer to top (user scrolled up, excess at bottom) → trim from bottom → no scroll adjustment needed
+   - Closer to bottom (user scrolled down, excess at top) → measure height of removed lines → `scrollTop -= removedHeight` → no visual jump
+   - Calls `onTrimBuffer(newStartLine, newLines)` to update App state
+
+3. **Jump from scrollbar drag**: `isJumpingRef` is true → walk DOM to find target line offset → set `scrollTop` directly
+
+The `isTrimming` ref prevents the trim-triggered re-render from re-entering the layout effect.
+
+**Scrollbar Communication (Two Directions)**:
+
+```
+Direction 1: wheel scroll → scrollbar (no callback)
+  Browser native scroll → onScroll handler fires
+  → Walk DOM line-containers, accumulate heights vs scrollTop
+  → Find first visible logical line
+  → setScrollbarPosition(firstVisibleLine)
+  → CustomScrollbar receives position prop → moves thumb
+  → CustomScrollbar does NOT call onPositionChange (prop update, not user drag)
+
+Direction 2: thumb drag → content (local scroll or backend jump)
+  User drags thumb → CustomScrollbar calls onPositionChange(linePosition)
+  → handleScrollbarDrag computes targetLine
+  → If targetLine in buffer:
+      Walk DOM to measure offset → set viewport.scrollTop directly
+      No backend request needed
+  → If targetLine outside buffer:
+      Debounce 150ms → onJumpToLine(startLine, FETCH_SIZE)
+      App replaces buffer entirely (isJumpRequestRef = true)
+      useLayoutEffect detects jump → measures DOM → sets scrollTop
+```
+
+**`handleScrollbarDrag` Implementation**:
 
 ```typescript
-// scrollTop → line number
-scrollFraction = scrollTop / maxScrollTop;  // 0.0 to 1.0
-line = scrollFraction * (totalLines - visibleLineCount);
+const handleScrollbarDrag = React.useCallback((pos: number) => {
+  const meta = fileMetaRef.current;
+  if (!meta) return;
+  const targetLine = Math.max(0, Math.min(Math.round(pos), meta.totalLines - 1));
 
-// line number → scrollTop
-scrollFraction = line / (totalLines - visibleLineCount);
-scrollTop = scrollFraction * maxScrollTop;
+  // Update scrollbar position immediately for visual feedback
+  setScrollbarPosition(targetLine);
+
+  // If target is already in the buffer, scroll to it locally
+  const buf = bufferRef.current;
+  if (buf.count > 0 && targetLine >= buf.start && targetLine < buf.start + buf.count) {
+    const lineIndex = targetLine - buf.start;
+    const lineElements = containerRef.current.querySelectorAll('.line-container');
+    let targetOffset = 0;
+    for (let i = 0; i < lineIndex; i++) {
+      targetOffset += (lineElements[i] as HTMLElement).offsetHeight;
+    }
+    viewportRef.current.scrollTop = targetOffset;
+    return;
+  }
+
+  // Target outside buffer — debounced backend request
+  if (dragDebounceRef.current) clearTimeout(dragDebounceRef.current);
+  dragDebounceRef.current = setTimeout(() => {
+    const halfWindow = Math.floor(FETCH_SIZE / 2);
+    const startLine = Math.max(0, targetLine - halfWindow);
+    const count = Math.min(FETCH_SIZE, meta.totalLines - startLine);
+    jumpTargetLineRef.current = targetLine;
+    isJumpingRef.current = true;
+    onJumpToLine(startLine, count);
+  }, 150);
+}, [onJumpToLine]);
 ```
 
-This ensures:
-- `scrollTop = 0` → line 0
-- `scrollTop = max` → last possible line (totalLines - visibleLineCount)
-- Linear and exact regardless of scroll height cap
+Key design decisions:
+- **Single handler**: ONE `handleScrollbarDrag` for both wrap and non-wrap modes
+- **Local scroll first**: If target line is in buffer, no backend request — just measure DOM and set scrollTop
+- **Debounced jump**: If target outside buffer, wait 150ms for drag to settle before requesting
+- **No suppressScrollRef**: The old spacer-based approach needed scroll suppression to prevent feedback loops. The sliding window approach doesn't need it because local scrolls don't trigger line requests (the line is already in buffer), and jump requests replace the buffer entirely
+- **Validates: Requirements 10.4, 10.11, 10.12, 12.9, 12.10, 12.11**
 
-**Line Positioning Clamping**:
+**Native Browser Scrolling for All Modes**:
 
-Rendered lines are positioned at `lineToScrollTop(linesStartLine)`, clamped so they never extend past the spacer bottom:
-```typescript
-clampedOffset = Math.min(linesPixelOffset, totalHeight - renderedLinesHeight);
-```
-This prevents the browser from bouncing `scrollTop` back when lines overflow the spacer.
+Both wrapped and non-wrapped modes use the same scrolling mechanism:
+- The viewport div has `overflow-y: auto`
+- Real DOM lines inside the container provide natural scrollable height
+- The browser handles all wheel/trackpad input natively, providing pixel-smooth scrolling
+- There is NO manual `onWheel` handler that translates `deltaY` to line jumps
+- There is NO `overflow-y: hidden` in any mode
+- There is NO spacer div or fake height
+- **Validates: Requirements 3.5, 12.3, 12.4, 12.5**
 
 **Styling Requirements**:
 - Monospaced font: `'Consolas', 'Monaco', 'Courier New', monospace`
 - Native vertical scrollbar hidden: `scrollbar-width: none` + `::-webkit-scrollbar { display: none }`
 - Horizontal scrolling: `overflow-x: auto` on content column when `wrapLines` is false, `overflow-x: hidden` when `wrapLines` is true
 - Preserve whitespace: `white-space: pre` when `wrapLines` is false, `white-space: pre-wrap` when `wrapLines` is true
-- Fixed line height (20px) for consistent virtual scroll calculations
+- Fixed line height (20px) for line number column only — content lines have variable height when wrapped
 
 **Line Wrapping Behavior**:
 
 When `wrapLines` is true:
 - Lines that exceed the visible width of the content column are wrapped to multiple visual rows
-- The line number is displayed only on the first visual row of each logical line
-- Subsequent visual rows of the same logical line have no line number displayed
+- The line number is displayed only on the first visual row of each logical line (via `alignSelf: 'flex-start'`)
 - The vertical scrollbar continues to represent logical lines (not visual rows)
 - Horizontal scrolling is disabled (`overflow-x: hidden`)
-- Text wrapping is enabled (`white-space: pre-wrap`)
+- Text wrapping is enabled (`white-space: pre-wrap`, `word-break: break-all`)
 
 When `wrapLines` is false:
 - Lines are displayed without wrapping
 - Each logical line occupies exactly one visual row
-- Horizontal scrolling is enabled for lines that exceed the visible width
+- Horizontal scrolling is enabled for lines that exceed the visible width (`overflow-x: auto`)
 - Text wrapping is disabled (`white-space: pre`)
 
-**Line Number Rendering with Wrapping**:
-
-The line numbers column must be synchronized with the content column. When a line wraps to multiple visual rows, the line number appears only on the first row. This can be achieved by:
-1. Rendering each logical line as a separate container (e.g., a `<div>` with class `line-container`)
-2. Within each container, display the line number and the line content side-by-side
-3. The line number has `align-self: flex-start` or similar to stay at the top of the container
-4. The line content wraps naturally within its column when `white-space: pre-wrap` is set
-
-Example structure:
-```tsx
-<div className="line-container">
-  <div className="line-number">{lineNum}</div>
-  <div className="line-content" style={{ whiteSpace: wrapLines ? 'pre-wrap' : 'pre' }}>
-    {lineText}
-  </div>
-</div>
-```
+Both modes use the identical DOM structure — only CSS properties differ. The sliding window handles variable line heights naturally, so wrap mode works without any special code path.
 
 ### 3a. CustomScrollbar Component
 
@@ -312,8 +456,9 @@ This ensures:
 
 **Design Rationale**:
 - The component is completely generic — it can be used for vertical scrolling, horizontal scrolling, volume sliders, or any other range-based control
-- The separation between external updates (no event) and user drags (with event) prevents feedback loops when the parent component updates position programmatically
+- The separation between external updates (no event) and user drags (with event) is the foundation of the unidirectional scrollbar communication pattern: when ContentArea updates the `position` prop (e.g., after a native scroll event), the scrollbar moves its thumb but does NOT call `onPositionChange`, preventing feedback loops
 - No track-click behavior — only thumb dragging is supported for position changes
+- **Validates: Requirements 10.4, 10.11, 10.12**
 
 ### 4. StatusBar Component
 
