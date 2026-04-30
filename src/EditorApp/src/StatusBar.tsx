@@ -7,10 +7,17 @@ interface FileMeta {
   encoding: string;
 }
 
+interface FileLoadProgressPayload {
+  fileName: string;
+  percent: number;
+  fileSizeBytes: number;
+}
+
 interface StatusBarProps {
   metadata: FileMeta | null | undefined;
   wrapLines: boolean;
   onWrapLinesChange: (enabled: boolean) => void;
+  loadProgress?: FileLoadProgressPayload | null;
 }
 
 /**
@@ -30,27 +37,47 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-function StatusBar({ metadata, wrapLines, onWrapLinesChange }: StatusBarProps) {
+function StatusBar({ metadata, wrapLines, onWrapLinesChange, loadProgress }: StatusBarProps) {
+  const showProgress = loadProgress != null && loadProgress.percent < 100;
+
   return (
     <div className="status-bar" role="contentinfo">
-      {metadata ? (
-        <div className="status-bar__items">
-          <span className="status-bar__item">{formatFileSize(metadata.fileSizeBytes)}</span>
-          <span className="status-bar__separator" aria-hidden="true">|</span>
-          <span className="status-bar__item">{metadata.totalLines} lines</span>
-          <span className="status-bar__separator" aria-hidden="true">|</span>
-          <span className="status-bar__item">{metadata.encoding}</span>
+      {showProgress ? (
+        <div
+          className="progress-bar"
+          role="progressbar"
+          aria-valuenow={loadProgress.percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div
+            className="progress-bar__fill"
+            style={{ width: `${loadProgress.percent}%` }}
+          />
+          <span className="progress-bar__text">Loading: {loadProgress.percent}%</span>
         </div>
-      ) : null}
-      <label className="status-bar__wrap-toggle">
-        <input
-          type="checkbox"
-          className="status-bar__wrap-checkbox"
-          checked={wrapLines}
-          onChange={(e) => onWrapLinesChange(e.target.checked)}
-        />
-        Wrap Lines
-      </label>
+      ) : (
+        <>
+          {metadata ? (
+            <div className="status-bar__items">
+              <span className="status-bar__item">{formatFileSize(metadata.fileSizeBytes)}</span>
+              <span className="status-bar__separator" aria-hidden="true">|</span>
+              <span className="status-bar__item">{metadata.totalLines} lines</span>
+              <span className="status-bar__separator" aria-hidden="true">|</span>
+              <span className="status-bar__item">{metadata.encoding}</span>
+            </div>
+          ) : null}
+          <label className="status-bar__wrap-toggle">
+            <input
+              type="checkbox"
+              className="status-bar__wrap-checkbox"
+              checked={wrapLines}
+              onChange={(e) => onWrapLinesChange(e.target.checked)}
+            />
+            Wrap Lines
+          </label>
+        </>
+      )}
     </div>
   );
 }

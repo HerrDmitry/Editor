@@ -10,6 +10,16 @@ namespace EditorApp.Services;
 public class FileService : IFileService
 {
     /// <summary>
+    /// Files larger than this threshold (in bytes) will report progress during scanning.
+    /// </summary>
+    public const long SizeThresholdBytes = 256_000;
+
+    /// <summary>
+    /// Minimum milliseconds between progress reports to avoid flooding the message bridge.
+    /// </summary>
+    private const int ProgressThrottleMs = 50;
+
+    /// <summary>
     /// Cache of line offset indices keyed by file path.
     /// Each list contains the byte offset of the start of each line.
     /// </summary>
@@ -31,7 +41,10 @@ public class FileService : IFileService
     }
 
     /// <inheritdoc />
-    public async Task<FileOpenMetadata> OpenFileAsync(string filePath)
+    public async Task<FileOpenMetadata> OpenFileAsync(
+        string filePath,
+        IProgress<FileLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (!File.Exists(filePath))
         {
@@ -40,6 +53,8 @@ public class FileService : IFileService
 
         var fileInfo = new FileInfo(filePath);
         var encoding = DetectEncoding(filePath);
+        var fileSize = fileInfo.Length;
+        var isLargeFile = fileSize > SizeThresholdBytes;
 
         // Scan file to build line offset index by reading raw bytes.
         // We cannot use StreamReader for this because its internal buffer
@@ -47,7 +62,14 @@ public class FileService : IFileService
         var lineOffsets = new List<long>();
         var bomLength = GetBomLength(encoding);
 
-        await using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536))
+        // Report initial progress for large files
+        if (isLargeFile && progress is not null)
+        {
+            progress.Report(new FileLoadProgress(fileInfo.Name, 0, fileSize));
+        }
+
+        var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
+        try
         {
             // Skip BOM if present
             if (bomLength > 0)
@@ -61,9 +83,15 @@ public class FileService : IFileService
             var buffer = new byte[65536];
             int bytesRead;
             bool prevWasCR = false;
+            long totalBytesRead = 0;
+            var lastReportTime = Environment.TickCount64;
 
-            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                totalBytesRead += bytesRead;
+
                 for (int i = 0; i < bytesRead; i++)
                 {
                     byte b = buffer[i];
@@ -87,6 +115,18 @@ public class FileService : IFileService
                         prevWasCR = (b == (byte)'\r');
                     }
                 }
+
+                // Report progress for large files with throttling
+                if (isLargeFile && progress is not null)
+                {
+                    var percent = (int)Math.Round((double)totalBytesRead / fileSize * 100);
+                    var now = Environment.TickCount64;
+                    if (now - lastReportTime >= ProgressThrottleMs || percent == 100)
+                    {
+                        progress.Report(new FileLoadProgress(fileInfo.Name, percent, fileSize));
+                        lastReportTime = now;
+                    }
+                }
             }
 
             // Handle trailing \r at end of file
@@ -94,6 +134,16 @@ public class FileService : IFileService
             {
                 lineOffsets.Add(stream.Length);
             }
+        }
+        finally
+        {
+            await stream.DisposeAsync();
+        }
+
+        // Report final 100% for large files
+        if (isLargeFile && progress is not null)
+        {
+            progress.Report(new FileLoadProgress(fileInfo.Name, 100, fileSize));
         }
 
         // If the last offset equals the file length and the file doesn't end with a newline,

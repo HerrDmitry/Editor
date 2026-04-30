@@ -21,6 +21,12 @@ interface ErrorInfo {
   details?: string;
 }
 
+interface FileLoadProgressPayload {
+  fileName: string;
+  percent: number;
+  fileSizeBytes: number;
+}
+
 function App() {
   const [fileMeta, setFileMeta] = React.useState<FileMeta | null>(null);
   const [lines, setLines] = React.useState<string[] | null>(null);
@@ -29,6 +35,7 @@ function App() {
   const [error, setError] = React.useState<ErrorInfo | null>(null);
   const [titleBarText, setTitleBarText] = React.useState('Editor');
   const [wrapLines, setWrapLines] = React.useState(false);
+  const [loadProgress, setLoadProgress] = React.useState<FileLoadProgressPayload | null>(null);
 
   const interopRef = React.useRef<any>(null);
   const lastRequestedStartRef = React.useRef<number>(0);
@@ -76,6 +83,7 @@ function App() {
       setFileMeta(data);
       setIsLoading(false);
       setError(null);
+      setLoadProgress(null);
       setTitleBarText(`${data.fileName} - Editor`);
       // Request initial lines — use a generous count to fill the buffer.
       // ContentArea will request more if needed once it knows the viewport size.
@@ -131,6 +139,15 @@ function App() {
     interop.onError((err: ErrorInfo) => {
       setError(err);
       setIsLoading(false);
+      setLoadProgress(null);
+    });
+
+    interop.onFileLoadProgress((data: FileLoadProgressPayload) => {
+      if (data.percent === 100) {
+        setLoadProgress(null);
+      } else {
+        setLoadProgress(data);
+      }
     });
 
     // Ctrl+O / Cmd+O keyboard shortcut
@@ -174,6 +191,7 @@ function App() {
         metadata: fileMeta,
         wrapLines,
         onWrapLinesChange: handleWrapLinesChange,
+        loadProgress,
       })}
     </div>
   );

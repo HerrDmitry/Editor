@@ -30,6 +30,13 @@ interface ErrorInfo {
   details?: string;
 }
 
+/** Payload from a FileLoadProgressMessage. */
+interface FileLoadProgressPayload {
+  fileName: string;
+  percent: number;
+  fileSizeBytes: number;
+}
+
 /** Common envelope for all messages exchanged between backend and frontend. */
 interface MessageEnvelope {
   type: string;
@@ -44,6 +51,7 @@ const MessageTypes = {
   FileOpenedResponse: 'FileOpenedResponse',
   LinesResponse: 'LinesResponse',
   ErrorResponse: 'ErrorResponse',
+  FileLoadProgressMessage: 'FileLoadProgressMessage',
 } as const;
 
 /**
@@ -55,6 +63,7 @@ interface InteropService {
   sendRequestLines(startLine: number, lineCount: number): void;
   onFileOpened(callback: (data: FileMeta) => void): void;
   onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
+  onFileLoadProgress(callback: (data: FileLoadProgressPayload) => void): void;
   onError(callback: (error: ErrorInfo) => void): void;
   dispose(): void;
 }
@@ -69,6 +78,7 @@ interface InteropService {
 function createInteropService(): InteropService {
   const fileOpenedCallbacks: Array<(data: FileMeta) => void> = [];
   const linesResponseCallbacks: Array<(data: LinesResponsePayload) => void> = [];
+  const fileLoadProgressCallbacks: Array<(data: FileLoadProgressPayload) => void> = [];
   const errorCallbacks: Array<(error: ErrorInfo) => void> = [];
 
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -105,6 +115,12 @@ function createInteropService(): InteropService {
       case MessageTypes.ErrorResponse:
         for (const cb of errorCallbacks) {
           cb(envelope.payload as ErrorInfo);
+        }
+        break;
+
+      case MessageTypes.FileLoadProgressMessage:
+        for (const cb of fileLoadProgressCallbacks) {
+          cb(envelope.payload as FileLoadProgressPayload);
         }
         break;
 
@@ -207,11 +223,16 @@ function createInteropService(): InteropService {
       errorCallbacks.push(callback);
     },
 
+    onFileLoadProgress(callback: (data: FileLoadProgressPayload) => void): void {
+      fileLoadProgressCallbacks.push(callback);
+    },
+
     dispose(): void {
       clearPendingTimeout();
       window.removeEventListener('message', handleDomMessage);
       fileOpenedCallbacks.length = 0;
       linesResponseCallbacks.length = 0;
+      fileLoadProgressCallbacks.length = 0;
       errorCallbacks.length = 0;
     },
   };

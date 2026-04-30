@@ -14,3 +14,8 @@ public record FileOpenMetadata(string FilePath, string FileName, int TotalLines,
 /// Result of reading a range of lines from a file.
 /// </summary>
 public record LinesResult(int StartLine, string[] Lines, int TotalLines);
+
+/// <summary>
+/// Progress data reported during the file scanning phase via IProgress&lt;T&gt;.
+/// </summary>
+public record FileLoadProgress(string FileName, int Percent, long FileSizeBytes);

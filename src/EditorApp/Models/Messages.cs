@@ -83,3 +83,18 @@ public class ErrorResponse : IMessage
     [JsonPropertyName("details")]
     public string? Details { get; set; }
 }
+
+/// <summary>
+/// Progress message sent to the frontend during the file scanning phase for large files.
+/// </summary>
+public class FileLoadProgressMessage : IMessage
+{
+    [JsonPropertyName("fileName")]
+    public string FileName { get; set; } = string.Empty;
+
+    [JsonPropertyName("percent")]
+    public int Percent { get; set; }
+
+    [JsonPropertyName("fileSizeBytes")]
+    public long FileSizeBytes { get; set; }
+}
