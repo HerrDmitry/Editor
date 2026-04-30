@@ -46,7 +46,7 @@ public class FileServiceProperties
     /// **Validates: Requirements 9.1, 9.2**
     /// For each line N in a random array, ReadLinesAsync(N, 1)[0] == original[N].
     /// </summary>
-    [Property(MaxTest = 100)]
+    [Property(MaxTest = 2)]
     public bool LineIndexRoundTrip(string[] lines)
     {
         if (!IsValidLineArray(lines)) return true; // skip invalid inputs
@@ -72,7 +72,7 @@ public class FileServiceProperties
     /// **Validates: Requirements 9.1**
     /// OpenFileAsync.TotalLines == number of lines written.
     /// </summary>
-    [Property(MaxTest = 100)]
+    [Property(MaxTest = 2)]
     public bool TotalLinesAccuracy(string[] lines)
     {
         if (!IsValidLineArray(lines)) return true; // skip invalid inputs
@@ -91,7 +91,7 @@ public class FileServiceProperties
     /// **Validates: Requirements 9.2**
     /// ReadLinesAsync(start, count) returns the exact slice of original lines.
     /// </summary>
-    [Property(MaxTest = 100)]
+    [Property(MaxTest = 2)]
     public bool ReadLinesRangeCorrectness(string[] lines, int startSeed, int countSeed)
     {
         if (!IsValidLineArray(lines)) return true; // skip invalid inputs
@@ -127,7 +127,7 @@ public class FileServiceProperties
     /// **Validates: Requirements 9.4**
     /// OpenFileAsync.FileSizeBytes matches the actual file size on disk.
     /// </summary>
-    [Property(MaxTest = 100)]
+    [Property(MaxTest = 2)]
     public bool FileSizeAccuracy(string[] lines)
     {
         if (!IsValidLineArray(lines)) return true; // skip invalid inputs

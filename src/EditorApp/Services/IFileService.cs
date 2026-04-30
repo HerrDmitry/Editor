@@ -15,9 +15,13 @@ public interface IFileService
 
     /// <summary>
     /// Scan a file to build a line offset index, count total lines, and detect encoding.
+    /// Reports progress for large files via the optional <paramref name="progress"/> callback.
     /// Returns metadata only — no file content is loaded into memory.
     /// </summary>
-    Task<FileOpenMetadata> OpenFileAsync(string filePath);
+    Task<FileOpenMetadata> OpenFileAsync(
+        string filePath,
+        IProgress<FileLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Read a range of lines from a previously opened file using the line offset index.

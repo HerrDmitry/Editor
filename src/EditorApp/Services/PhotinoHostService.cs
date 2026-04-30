@@ -18,6 +18,12 @@ public class PhotinoHostService
     private readonly IFileService _fileService;
 
     /// <summary>
+    /// Cancellation token source for the current file scan operation.
+    /// Cancelled when a new file is opened while a scan is in progress.
+    /// </summary>
+    private CancellationTokenSource? _scanCts;
+
+    /// <summary>
     /// Path of the currently open file, used by HandleRequestLinesAsync.
     /// </summary>
     private string? _currentFilePath;
@@ -29,6 +35,18 @@ public class PhotinoHostService
         _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
 
         ConfigureWindow();
+        RegisterMessageHandlers();
+    }
+
+    /// <summary>
+    /// Internal constructor for unit testing — bypasses PhotinoBlazorApp window setup.
+    /// </summary>
+    internal PhotinoHostService(IMessageRouter messageRouter, IFileService fileService)
+    {
+        _app = null!;
+        _messageRouter = messageRouter ?? throw new ArgumentNullException(nameof(messageRouter));
+        _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
+
         RegisterMessageHandlers();
     }
 
@@ -78,21 +96,50 @@ public class PhotinoHostService
     /// </summary>
     private async Task HandleOpenFileRequestAsync(OpenFileRequest request)
     {
+        // Show native file picker via Photino
+        var selectedFiles = _app.MainWindow.ShowOpenFile();
+
+        if (selectedFiles is null || selectedFiles.Length == 0 || string.IsNullOrEmpty(selectedFiles[0]))
+        {
+            // User cancelled the dialog — no action needed (Requirement 2.3).
+            return;
+        }
+
+        await OpenFileByPathAsync(selectedFiles[0]);
+    }
+
+    /// <summary>
+    /// Core file-open logic: cancels any in-progress scan, creates progress reporter,
+    /// scans the file, and sends metadata to the UI.
+    /// Extracted from HandleOpenFileRequestAsync for testability.
+    /// </summary>
+    internal async Task OpenFileByPathAsync(string filePath)
+    {
         try
         {
-            // Show native file picker via Photino
-            var selectedFiles = _app.MainWindow.ShowOpenFile();
-
-            if (selectedFiles is null || selectedFiles.Length == 0 || string.IsNullOrEmpty(selectedFiles[0]))
+            // Cancel any existing scan in progress (Requirement 9.1)
+            if (_scanCts is not null)
             {
-                // User cancelled the dialog — no action needed (Requirement 2.3).
-                return;
+                _scanCts.Cancel();
+                _scanCts.Dispose();
             }
 
-            var filePath = selectedFiles[0];
+            // Create new CancellationTokenSource for this scan
+            _scanCts = new CancellationTokenSource();
+
+            // Create progress reporter that forwards to UI via MessageRouter
+            var progress = new Progress<FileLoadProgress>(p =>
+            {
+                _ = _messageRouter.SendToUIAsync(new FileLoadProgressMessage
+                {
+                    FileName = p.FileName,
+                    Percent = p.Percent,
+                    FileSizeBytes = p.FileSizeBytes
+                });
+            });
 
             // Scan the file to build line offset index and get metadata
-            var metadata = await _fileService.OpenFileAsync(filePath);
+            var metadata = await _fileService.OpenFileAsync(filePath, progress, _scanCts.Token);
 
             // Store current file path for subsequent ReadLinesAsync calls
             _currentFilePath = filePath;
@@ -105,6 +152,11 @@ public class PhotinoHostService
                 FileSizeBytes = metadata.FileSizeBytes,
                 Encoding = metadata.Encoding
             });
+        }
+        catch (OperationCanceledException)
+        {
+            // Scan was cancelled due to a new file being opened — log and do not send error to UI (Requirement 9.3)
+            Console.Error.WriteLine("[INFO] File scan cancelled due to new file open request.");
         }
         catch (FileNotFoundException ex)
         {
