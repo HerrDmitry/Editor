@@ -57,6 +57,7 @@ public class MockFileService : IFileService
 
     public async Task<FileOpenMetadata> OpenFileAsync(
         string filePath,
+        Action<FileOpenMetadata>? onPartialMetadata = null,
         IProgress<FileLoadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {

@@ -15,11 +15,15 @@ public interface IFileService
 
     /// <summary>
     /// Scan a file to build a line offset index, count total lines, and detect encoding.
+    /// For large files (>256KB), invokes <paramref name="onPartialMetadata"/> exactly once
+    /// after the first 256KB has been scanned, providing provisional metadata so the UI
+    /// can display content immediately while scanning continues.
     /// Reports progress for large files via the optional <paramref name="progress"/> callback.
-    /// Returns metadata only — no file content is loaded into memory.
+    /// Returns final metadata only — no file content is loaded into memory.
     /// </summary>
     Task<FileOpenMetadata> OpenFileAsync(
         string filePath,
+        Action<FileOpenMetadata>? onPartialMetadata = null,
         IProgress<FileLoadProgress>? progress = null,
         CancellationToken cancellationToken = default);
 

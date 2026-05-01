@@ -35,7 +35,7 @@ public class ProgressSequencePropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 // Allow Progress<T> callbacks to complete
                 Thread.Sleep(150);
 
@@ -89,7 +89,7 @@ public class ProgressSequencePropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 Thread.Sleep(150);
 
                 var allInRange = reports.All(r => r.Percent >= 0 && r.Percent <= 100);

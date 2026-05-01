@@ -41,7 +41,7 @@ public class ProgressThrottlePropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 // Allow Progress<T> callbacks to complete
                 Thread.Sleep(200);
 
@@ -102,7 +102,7 @@ public class ProgressThrottlePropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 Thread.Sleep(100);
 
                 if (reports.Count == 0)

@@ -42,6 +42,15 @@ function StatusBar({ metadata, wrapLines, onWrapLinesChange, loadProgress }: Sta
 
   return (
     <div className="status-bar" role="contentinfo">
+      {metadata ? (
+        <div className="status-bar__items">
+          <span className="status-bar__item">{formatFileSize(metadata.fileSizeBytes)}</span>
+          <span className="status-bar__separator" aria-hidden="true">|</span>
+          <span className="status-bar__item">{metadata.totalLines} lines</span>
+          <span className="status-bar__separator" aria-hidden="true">|</span>
+          <span className="status-bar__item">{metadata.encoding}</span>
+        </div>
+      ) : null}
       {showProgress ? (
         <div
           className="progress-bar"
@@ -56,28 +65,18 @@ function StatusBar({ metadata, wrapLines, onWrapLinesChange, loadProgress }: Sta
           />
           <span className="progress-bar__text">Loading: {loadProgress.percent}%</span>
         </div>
-      ) : (
-        <>
-          {metadata ? (
-            <div className="status-bar__items">
-              <span className="status-bar__item">{formatFileSize(metadata.fileSizeBytes)}</span>
-              <span className="status-bar__separator" aria-hidden="true">|</span>
-              <span className="status-bar__item">{metadata.totalLines} lines</span>
-              <span className="status-bar__separator" aria-hidden="true">|</span>
-              <span className="status-bar__item">{metadata.encoding}</span>
-            </div>
-          ) : null}
-          <label className="status-bar__wrap-toggle">
-            <input
-              type="checkbox"
-              className="status-bar__wrap-checkbox"
-              checked={wrapLines}
-              onChange={(e) => onWrapLinesChange(e.target.checked)}
-            />
-            Wrap Lines
-          </label>
-        </>
-      )}
+      ) : null}
+      {!showProgress ? (
+        <label className="status-bar__wrap-toggle">
+          <input
+            type="checkbox"
+            className="status-bar__wrap-checkbox"
+            checked={wrapLines}
+            onChange={(e) => onWrapLinesChange(e.target.checked)}
+          />
+          Wrap Lines
+        </label>
+      ) : null}
     </div>
   );
 }

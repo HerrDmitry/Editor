@@ -85,6 +85,7 @@ public class ErrorHaltsProgressPropertyTests
 
         public Task<FileOpenMetadata> OpenFileAsync(
             string filePath,
+            Action<FileOpenMetadata>? onPartialMetadata = null,
             IProgress<FileLoadProgress>? progress = null,
             CancellationToken cancellationToken = default)
         {
