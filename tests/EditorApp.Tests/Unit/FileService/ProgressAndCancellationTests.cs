@@ -20,7 +20,7 @@ public class ProgressAndCancellationTests
         var path = CreateTempFileOfSize(100);
         try
         {
-            await sut.OpenFileAsync(path, progress);
+            await sut.OpenFileAsync(path, progress: progress);
             await Task.Delay(50); // Allow Progress<T> callbacks to post
 
             Assert.Empty(reports);
@@ -41,7 +41,7 @@ public class ProgressAndCancellationTests
         var path = CreateTempFileOfSize(Services.FileService.SizeThresholdBytes);
         try
         {
-            await sut.OpenFileAsync(path, progress);
+            await sut.OpenFileAsync(path, progress: progress);
             await Task.Delay(50);
 
             Assert.Empty(reports);
@@ -62,7 +62,7 @@ public class ProgressAndCancellationTests
         var path = CreateTempFileOfSize(Services.FileService.SizeThresholdBytes + 1);
         try
         {
-            await sut.OpenFileAsync(path, progress);
+            await sut.OpenFileAsync(path, progress: progress);
             await Task.Delay(100);
 
             Assert.True(reports.Count >= 2, $"Expected ≥2 progress reports, got {reports.Count}");
@@ -92,7 +92,7 @@ public class ProgressAndCancellationTests
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
             {
-                await sut.OpenFileAsync(path, progress, cts.Token);
+                await sut.OpenFileAsync(path, progress: progress, cancellationToken: cts.Token);
             });
 
             // File handle should be released — verify by opening the file again
@@ -123,7 +123,7 @@ public class ProgressAndCancellationTests
 
             try
             {
-                await sut.OpenFileAsync(path1, null, cts.Token);
+                await sut.OpenFileAsync(path1, cancellationToken: cts.Token);
             }
             catch (OperationCanceledException)
             {
@@ -134,7 +134,7 @@ public class ProgressAndCancellationTests
             var reports = new List<FileLoadProgress>();
             var progress = new Progress<FileLoadProgress>(r => reports.Add(r));
 
-            var metadata = await sut.OpenFileAsync(path2, progress);
+            var metadata = await sut.OpenFileAsync(path2, progress: progress);
             await Task.Delay(100);
 
             Assert.NotNull(metadata);

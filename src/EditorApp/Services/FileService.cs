@@ -25,6 +25,12 @@ public class FileService : IFileService
     /// </summary>
     private readonly Dictionary<string, List<long>> _lineIndexCache = new();
 
+    /// <summary>
+    /// Lock protecting concurrent access to <see cref="_lineIndexCache"/> entries
+    /// during partial index reads while scanning is still in progress.
+    /// </summary>
+    private readonly object _indexLock = new();
+
     /// <inheritdoc />
     public Task<FileOpenResult> OpenFileDialogAsync()
     {
@@ -43,6 +49,7 @@ public class FileService : IFileService
     /// <inheritdoc />
     public async Task<FileOpenMetadata> OpenFileAsync(
         string filePath,
+        Action<FileOpenMetadata>? onPartialMetadata = null,
         IProgress<FileLoadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -84,6 +91,7 @@ public class FileService : IFileService
             int bytesRead;
             bool prevWasCR = false;
             long totalBytesRead = 0;
+            bool partialEmitted = false;
             var lastReportTime = Environment.TickCount64;
 
             while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
@@ -100,20 +108,54 @@ public class FileService : IFileService
                     {
                         // \n or the \n part of \r\n — new line starts after this byte
                         long nextLineOffset = stream.Position - bytesRead + i + 1;
-                        lineOffsets.Add(nextLineOffset);
+                        if (partialEmitted)
+                        {
+                            lock (_indexLock) { lineOffsets.Add(nextLineOffset); }
+                        }
+                        else
+                        {
+                            lineOffsets.Add(nextLineOffset);
+                        }
                         prevWasCR = false;
                     }
                     else if (prevWasCR)
                     {
                         // Previous byte was \r but this byte is not \n — standalone \r line ending
                         long nextLineOffset = stream.Position - bytesRead + i;
-                        lineOffsets.Add(nextLineOffset);
+                        if (partialEmitted)
+                        {
+                            lock (_indexLock) { lineOffsets.Add(nextLineOffset); }
+                        }
+                        else
+                        {
+                            lineOffsets.Add(nextLineOffset);
+                        }
                         prevWasCR = (b == (byte)'\r');
                     }
                     else
                     {
                         prevWasCR = (b == (byte)'\r');
                     }
+                }
+
+                // Check if threshold crossed — emit partial metadata once
+                if (totalBytesRead >= SizeThresholdBytes && !partialEmitted)
+                {
+                    lock (_indexLock)
+                    {
+                        _lineIndexCache[filePath] = lineOffsets;
+                    }
+
+                    var partialEncodingName = GetEncodingDisplayName(encoding);
+                    onPartialMetadata?.Invoke(new FileOpenMetadata(
+                        filePath,
+                        fileInfo.Name,
+                        lineOffsets.Count,
+                        fileInfo.Length,
+                        partialEncodingName
+                    ));
+
+                    partialEmitted = true;
                 }
 
                 // Report progress for large files with throttling
@@ -132,7 +174,14 @@ public class FileService : IFileService
             // Handle trailing \r at end of file
             if (prevWasCR)
             {
-                lineOffsets.Add(stream.Length);
+                if (partialEmitted)
+                {
+                    lock (_indexLock) { lineOffsets.Add(stream.Length); }
+                }
+                else
+                {
+                    lineOffsets.Add(stream.Length);
+                }
             }
         }
         finally
@@ -154,7 +203,10 @@ public class FileService : IFileService
         }
 
         // Store index for later ReadLinesAsync calls
-        _lineIndexCache[filePath] = lineOffsets;
+        lock (_indexLock)
+        {
+            _lineIndexCache[filePath] = lineOffsets;
+        }
 
         // Total lines = number of line start offsets
         var totalLines = lineOffsets.Count;
@@ -173,40 +225,52 @@ public class FileService : IFileService
     /// <inheritdoc />
     public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
     {
-        if (!_lineIndexCache.TryGetValue(filePath, out var lineOffsets))
+        int snapshotCount;
+        long startOffset;
+
+        // Acquire lock → snapshot index count and needed offset → release lock before I/O
+        lock (_indexLock)
         {
-            throw new InvalidOperationException($"File has not been opened: {filePath}");
+            if (!_lineIndexCache.TryGetValue(filePath, out var lineOffsets))
+            {
+                throw new InvalidOperationException($"File has not been opened: {filePath}");
+            }
+
+            snapshotCount = lineOffsets.Count;
+
+            // Clamp startLine
+            if (startLine < 0) startLine = 0;
+            if (startLine >= snapshotCount)
+            {
+                return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
+            }
+
+            // Clamp lineCount to snapshot
+            var clampedCount = Math.Min(lineCount, snapshotCount - startLine);
+            if (clampedCount <= 0)
+            {
+                return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
+            }
+
+            // Copy needed offset value while holding lock
+            startOffset = lineOffsets[startLine];
+            lineCount = clampedCount;
         }
 
-        var totalLines = lineOffsets.Count;
-
-        // Clamp startLine
-        if (startLine < 0) startLine = 0;
-        if (startLine >= totalLines)
-        {
-            return new LinesResult(startLine, Array.Empty<string>(), totalLines);
-        }
-
-        // Clamp lineCount
-        var actualCount = Math.Min(lineCount, totalLines - startLine);
-        if (actualCount <= 0)
-        {
-            return new LinesResult(startLine, Array.Empty<string>(), totalLines);
-        }
-
+        // File I/O outside lock
         var encoding = DetectEncoding(filePath);
-        var lines = new string[actualCount];
+        var lines = new string[lineCount];
 
         await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        stream.Seek(lineOffsets[startLine], SeekOrigin.Begin);
+        stream.Seek(startOffset, SeekOrigin.Begin);
         using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
 
-        for (int i = 0; i < actualCount; i++)
+        for (int i = 0; i < lineCount; i++)
         {
             lines[i] = await reader.ReadLineAsync() ?? string.Empty;
         }
 
-        return new LinesResult(startLine, lines, totalLines);
+        return new LinesResult(startLine, lines, snapshotCount);
     }
 
     /// <summary>

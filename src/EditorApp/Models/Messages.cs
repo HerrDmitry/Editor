@@ -52,6 +52,9 @@ public class FileOpenedResponse : IMessage
 
     [JsonPropertyName("encoding")]
     public string Encoding { get; set; } = string.Empty;
+
+    [JsonPropertyName("isPartial")]
+    public bool IsPartial { get; set; }
 }
 
 /// <summary>

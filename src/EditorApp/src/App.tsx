@@ -7,6 +7,7 @@ interface FileMeta {
   totalLines: number;
   fileSizeBytes: number;
   encoding: string;
+  isPartial: boolean;
 }
 
 interface LinesResponsePayload {
@@ -45,9 +46,13 @@ function App() {
   const linesRef = React.useRef<string[] | null>(null);
   const linesStartRef = React.useRef(0);
 
+  // Track current fileMeta via ref to avoid stale closure in onFileOpened callback.
+  const fileMetaRef = React.useRef<FileMeta | null>(null);
+
   // Keep refs in sync with state.
   React.useEffect(() => { linesRef.current = lines; }, [lines]);
   React.useEffect(() => { linesStartRef.current = linesStartLine; }, [linesStartLine]);
+  React.useEffect(() => { fileMetaRef.current = fileMeta; }, [fileMeta]);
 
   const handleWrapLinesChange = React.useCallback((enabled: boolean) => {
     setWrapLines(enabled);
@@ -80,15 +85,33 @@ function App() {
     interopRef.current = interop;
 
     interop.onFileOpened((data: FileMeta) => {
-      setFileMeta(data);
-      setIsLoading(false);
-      setError(null);
-      setLoadProgress(null);
-      setTitleBarText(`${data.fileName} - Editor`);
-      // Request initial lines — use a generous count to fill the buffer.
-      // ContentArea will request more if needed once it knows the viewport size.
-      lastRequestedStartRef.current = 0;
-      interop.sendRequestLines(0, 200);
+      if (data.isPartial) {
+        // Partial metadata — show content immediately
+        setFileMeta(data);
+        setIsLoading(false);
+        setError(null);
+        setTitleBarText(`${data.fileName} - Editor`);
+        // DON'T clear loadProgress — progress bar stays visible
+        // Request initial lines
+        lastRequestedStartRef.current = 0;
+        interop.sendRequestLines(0, 200);
+      } else {
+        // Final metadata
+        if (fileMetaRef.current && fileMetaRef.current.fileName === data.fileName) {
+          // Same file — update totalLines only, preserve scroll/buffer
+          setFileMeta(data);
+          setLoadProgress(null);
+        } else {
+          // Different file (small file or first open) — full reset
+          setFileMeta(data);
+          setIsLoading(false);
+          setError(null);
+          setLoadProgress(null);
+          setTitleBarText(`${data.fileName} - Editor`);
+          lastRequestedStartRef.current = 0;
+          interop.sendRequestLines(0, 200);
+        }
+      }
     });
 
     interop.onLinesResponse((data: LinesResponsePayload) => {

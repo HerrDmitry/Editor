@@ -14,6 +14,7 @@ interface FileMeta {
   totalLines: number;
   fileSizeBytes: number;
   encoding: string;
+  isPartial: boolean;
 }
 
 /** Payload from a LinesResponse message. */

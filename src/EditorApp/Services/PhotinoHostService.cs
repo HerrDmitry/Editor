@@ -138,19 +138,34 @@ public class PhotinoHostService
                 });
             });
 
+            // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early
+            Action<FileOpenMetadata> onPartialMetadata = (partialMeta) =>
+            {
+                _currentFilePath = filePath;
+                _ = _messageRouter.SendToUIAsync(new FileOpenedResponse
+                {
+                    FileName = partialMeta.FileName,
+                    TotalLines = partialMeta.TotalLines,
+                    FileSizeBytes = partialMeta.FileSizeBytes,
+                    Encoding = partialMeta.Encoding,
+                    IsPartial = true
+                });
+            };
+
             // Scan the file to build line offset index and get metadata
-            var metadata = await _fileService.OpenFileAsync(filePath, progress, _scanCts.Token);
+            var metadata = await _fileService.OpenFileAsync(filePath, onPartialMetadata, progress, _scanCts.Token);
 
             // Store current file path for subsequent ReadLinesAsync calls
             _currentFilePath = filePath;
 
-            // Send metadata to the UI (no file content)
+            // Send final metadata to the UI (scan complete)
             await _messageRouter.SendToUIAsync(new FileOpenedResponse
             {
                 FileName = metadata.FileName,
                 TotalLines = metadata.TotalLines,
                 FileSizeBytes = metadata.FileSizeBytes,
-                Encoding = metadata.Encoding
+                Encoding = metadata.Encoding,
+                IsPartial = false
             });
         }
         catch (OperationCanceledException)

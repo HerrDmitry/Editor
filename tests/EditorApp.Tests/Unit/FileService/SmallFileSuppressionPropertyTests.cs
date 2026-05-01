@@ -33,7 +33,7 @@ public class SmallFileSuppressionPropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 // Allow Progress<T> callbacks to complete (they're posted to sync context)
                 Thread.Sleep(50);
                 return (reports.Count == 0)
@@ -66,7 +66,7 @@ public class SmallFileSuppressionPropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 // Allow Progress<T> callbacks to complete
                 Thread.Sleep(100);
                 return (reports.Count >= 2)
@@ -101,7 +101,7 @@ public class SmallFileSuppressionPropertyTests
             var path = CreateTempFileOfSize(fileSize);
             try
             {
-                sut.OpenFileAsync(path, progress).GetAwaiter().GetResult();
+                sut.OpenFileAsync(path, progress: progress).GetAwaiter().GetResult();
                 Thread.Sleep(100);
 
                 if (fileSize <= Services.FileService.SizeThresholdBytes)
