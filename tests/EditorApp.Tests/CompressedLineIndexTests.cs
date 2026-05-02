@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text;
 using EditorApp.Services;
@@ -223,19 +224,19 @@ public class CompressedLineIndexIntegrationTests : IDisposable
         // Assert: metadata reports correct total lines
         Assert.Equal(500, metadata.TotalLines);
 
-        // Verify via reflection that _lineIndexCache contains a CompressedLineIndex
+        // Verify via reflection that _lineIndexCache contains a CacheEntry with CompressedLineIndex
         var cacheField = typeof(FileService).GetField(
             "_lineIndexCache",
             BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.NotNull(cacheField);
 
-        var cache = cacheField!.GetValue(fileService) as Dictionary<string, CompressedLineIndex>;
+        var cache = cacheField!.GetValue(fileService) as ConcurrentDictionary<string, CacheEntry>;
         Assert.NotNull(cache);
         Assert.True(cache!.ContainsKey(path));
 
-        var index = cache[path];
-        Assert.IsType<CompressedLineIndex>(index);
-        Assert.Equal(500, index.LineCount);
+        var entry = cache[path];
+        Assert.IsType<CompressedLineIndex>(entry.Index);
+        Assert.Equal(500, entry.Index.LineCount);
     }
 
     [Fact]

@@ -194,7 +194,9 @@ public class CancellationUnitTests
             return new FileOpenMetadata(filePath, Path.GetFileName(filePath), 10, 1000, "UTF-8");
         }
 
-        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
             => Task.FromResult(new LinesResult(startLine, new[] { "line" }, 10));
+
+        public void CloseFile(string filePath) { }
     }
 }

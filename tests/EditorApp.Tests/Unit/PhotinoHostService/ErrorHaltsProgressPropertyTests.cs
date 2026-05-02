@@ -103,7 +103,9 @@ public class ErrorHaltsProgressPropertyTests
             return Task.FromResult(new FileOpenMetadata(filePath, "largefile.txt", 100, 1_000_000, "UTF-8"));
         }
 
-        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
             => Task.FromResult(new LinesResult(startLine, new[] { "line" }, 100));
+
+        public void CloseFile(string filePath) { }
     }
 }

@@ -1,7 +1,13 @@
+using System.Collections.Concurrent;
 using System.Text;
 using EditorApp.Models;
 
 namespace EditorApp.Services;
+
+/// <summary>
+/// Stores cached metadata for an opened file alongside its line index.
+/// </summary>
+internal record CacheEntry(CompressedLineIndex Index, Encoding Encoding, long FileSize, DateTime LastWriteTimeUtc);
 
 /// <summary>
 /// Handles all file system operations using streamed reading with a line offset index.
@@ -20,16 +26,10 @@ public class FileService : IFileService
     private const int ProgressThrottleMs = 50;
 
     /// <summary>
-    /// Cache of line offset indices keyed by file path.
-    /// Each list contains the byte offset of the start of each line.
+    /// Cache of line offset indices and metadata keyed by file path.
+    /// Uses ConcurrentDictionary for thread-safe access without manual locking.
     /// </summary>
-    private readonly Dictionary<string, CompressedLineIndex> _lineIndexCache = new();
-
-    /// <summary>
-    /// Lock protecting concurrent access to <see cref="_lineIndexCache"/> entries
-    /// during partial index reads while scanning is still in progress.
-    /// </summary>
-    private readonly object _indexLock = new();
+    private readonly ConcurrentDictionary<string, CacheEntry> _lineIndexCache = new();
 
     /// <inheritdoc />
     public Task<FileOpenResult> OpenFileDialogAsync()
@@ -75,110 +75,101 @@ public class FileService : IFileService
             progress.Report(new FileLoadProgress(fileInfo.Name, 0, fileSize));
         }
 
-        var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
-        try
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
+
+        // Skip BOM if present
+        if (bomLength > 0)
         {
-            // Skip BOM if present
-            if (bomLength > 0)
+            stream.Seek(bomLength, SeekOrigin.Begin);
+        }
+
+        // First line starts after BOM (or at 0 if no BOM)
+        index.AddOffset(stream.Position);
+
+        var buffer = new byte[65536];
+        int bytesRead;
+        bool prevWasCR = false;
+        long totalBytesRead = 0;
+        bool partialEmitted = false;
+        var lastReportTime = Environment.TickCount64;
+
+        while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            totalBytesRead += bytesRead;
+
+            for (int i = 0; i < bytesRead; i++)
             {
-                stream.Seek(bomLength, SeekOrigin.Begin);
-            }
+                byte b = buffer[i];
 
-            // First line starts after BOM (or at 0 if no BOM)
-            index.AddOffset(stream.Position);
-
-            var buffer = new byte[65536];
-            int bytesRead;
-            bool prevWasCR = false;
-            long totalBytesRead = 0;
-            bool partialEmitted = false;
-            var lastReportTime = Environment.TickCount64;
-
-            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                totalBytesRead += bytesRead;
-
-                for (int i = 0; i < bytesRead; i++)
+                if (b == (byte)'\n')
                 {
-                    byte b = buffer[i];
-
-                    if (b == (byte)'\n')
-                    {
-                        // \n or the \n part of \r\n — new line starts after this byte
-                        long nextLineOffset = stream.Position - bytesRead + i + 1;
-                        index.AddOffset(nextLineOffset);
-                        prevWasCR = false;
-                    }
-                    else if (prevWasCR)
-                    {
-                        // Previous byte was \r but this byte is not \n — standalone \r line ending
-                        long nextLineOffset = stream.Position - bytesRead + i;
-                        index.AddOffset(nextLineOffset);
-                        prevWasCR = (b == (byte)'\r');
-                    }
-                    else
-                    {
-                        prevWasCR = (b == (byte)'\r');
-                    }
+                    // \n or the \n part of \r\n — new line starts after this byte
+                    long nextLineOffset = stream.Position - bytesRead + i + 1;
+                    index.AddOffset(nextLineOffset);
+                    prevWasCR = false;
                 }
-
-                // Check if threshold crossed — emit partial metadata once
-                if (totalBytesRead >= SizeThresholdBytes && !partialEmitted)
+                else if (prevWasCR)
                 {
-                    index.EnableConcurrentAccess();
-
-                    lock (_indexLock)
-                    {
-                        _lineIndexCache[filePath] = index;
-                    }
-
-                    var partialEncodingName = GetEncodingDisplayName(encoding);
-                    onPartialMetadata?.Invoke(new FileOpenMetadata(
-                        filePath,
-                        fileInfo.Name,
-                        index.LineCount,
-                        fileInfo.Length,
-                        partialEncodingName
-                    ));
-
-                    partialEmitted = true;
+                    // Previous byte was \r but this byte is not \n — standalone \r line ending
+                    long nextLineOffset = stream.Position - bytesRead + i;
+                    index.AddOffset(nextLineOffset);
+                    prevWasCR = (b == (byte)'\r');
                 }
-
-                // Report progress for large files with throttling
-                if (isLargeFile && progress is not null)
+                else
                 {
-                    var percent = (int)Math.Round((double)totalBytesRead / fileSize * 100);
-                    var now = Environment.TickCount64;
-                    if (now - lastReportTime >= ProgressThrottleMs || percent == 100)
-                    {
-                        progress.Report(new FileLoadProgress(fileInfo.Name, percent, fileSize));
-                        lastReportTime = now;
-                    }
+                    prevWasCR = (b == (byte)'\r');
                 }
             }
 
-            // Handle trailing \r at end of file
-            if (prevWasCR)
+            // Check if threshold crossed — emit partial metadata once
+            if (totalBytesRead >= SizeThresholdBytes && !partialEmitted)
             {
-                index.AddOffset(stream.Length);
+                index.EnableConcurrentAccess();
+
+                _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc);
+
+                var partialEncodingName = GetEncodingDisplayName(encoding);
+                onPartialMetadata?.Invoke(new FileOpenMetadata(
+                    filePath,
+                    fileInfo.Name,
+                    index.LineCount,
+                    fileInfo.Length,
+                    partialEncodingName
+                ));
+
+                partialEmitted = true;
             }
 
-            // Remove trailing offset that points to EOF — a file ending with a
-            // newline does not create an additional empty line.
-            if (index.LineCount > 1)
+            // Report progress for large files with throttling
+            if (isLargeFile && progress is not null)
             {
-                int lastLine = index.LineCount - 1;
-                if (index.GetOffset(lastLine) == stream.Length)
+                var percent = (int)Math.Round((double)totalBytesRead / fileSize * 100);
+                var now = Environment.TickCount64;
+                if (now - lastReportTime >= ProgressThrottleMs || percent == 100)
                 {
-                    index.RemoveLastOffset();
+                    progress.Report(new FileLoadProgress(fileInfo.Name, percent, fileSize));
+                    lastReportTime = now;
                 }
             }
         }
-        finally
+
+        // Handle trailing \r at end of file
+        if (prevWasCR)
         {
-            await stream.DisposeAsync();
+            index.AddOffset(stream.Length);
+        }
+
+        // Remove trailing offset that points to EOF — a file ending with a
+        // newline does not create an additional empty line.
+        if (index.LineCount > 1)
+        {
+            int lastLine = index.LineCount - 1;
+            if (index.GetOffset(lastLine) == stream.Length)
+            {
+                index.RemoveLastOffset();
+            }
         }
 
         // Report final 100% for large files
@@ -191,10 +182,7 @@ public class FileService : IFileService
         index.Seal();
 
         // Store index for later ReadLinesAsync calls
-        lock (_indexLock)
-        {
-            _lineIndexCache[filePath] = index;
-        }
+        _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc);
 
         // Total lines = number of line start offsets
         var totalLines = index.LineCount;
@@ -211,43 +199,54 @@ public class FileService : IFileService
     }
 
     /// <inheritdoc />
-    public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+    public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
     {
         int snapshotCount;
         long startOffset;
 
-        // Acquire lock → snapshot index count and needed offset → release lock before I/O
-        lock (_indexLock)
+        // Check cancellation before any I/O
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // ConcurrentDictionary provides thread-safe access without manual locking
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
         {
-            if (!_lineIndexCache.TryGetValue(filePath, out var index))
-            {
-                throw new InvalidOperationException($"File has not been opened: {filePath}");
-            }
-
-            snapshotCount = index.LineCount;
-
-            // Clamp startLine
-            if (startLine < 0) startLine = 0;
-            if (startLine >= snapshotCount)
-            {
-                return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
-            }
-
-            // Clamp lineCount to snapshot
-            var clampedCount = Math.Min(lineCount, snapshotCount - startLine);
-            if (clampedCount <= 0)
-            {
-                return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
-            }
-
-            // Copy needed offset value while holding lock
-            startOffset = index.GetOffset(startLine);
-            lineCount = clampedCount;
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
         }
 
-        // File I/O outside lock
-        var encoding = DetectEncoding(filePath);
+        // Stale file detection — verify file hasn't been modified since OpenFileAsync
+        var currentFileInfo = new FileInfo(filePath);
+        if (currentFileInfo.Length != cacheEntry.FileSize ||
+            currentFileInfo.LastWriteTimeUtc != cacheEntry.LastWriteTimeUtc)
+        {
+            throw new InvalidOperationException(
+                $"File has been modified since it was opened: {filePath}");
+        }
+
+        var index = cacheEntry.Index;
+        snapshotCount = index.LineCount;
+
+        // Clamp startLine
+        if (startLine < 0) startLine = 0;
+        if (startLine >= snapshotCount)
+        {
+            return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
+        }
+
+        // Clamp lineCount to snapshot
+        var clampedCount = Math.Min(lineCount, snapshotCount - startLine);
+        if (clampedCount <= 0)
+        {
+            return new LinesResult(startLine, Array.Empty<string>(), snapshotCount);
+        }
+
+        startOffset = index.GetOffset(startLine);
+        lineCount = clampedCount;
+
+        // Use cached encoding from CacheEntry instead of re-detecting
+        var encoding = cacheEntry.Encoding;
         var lines = new string[lineCount];
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         stream.Seek(startOffset, SeekOrigin.Begin);
@@ -255,10 +254,20 @@ public class FileService : IFileService
 
         for (int i = 0; i < lineCount; i++)
         {
-            lines[i] = await reader.ReadLineAsync() ?? string.Empty;
+            cancellationToken.ThrowIfCancellationRequested();
+            lines[i] = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
         }
 
         return new LinesResult(startLine, lines, snapshotCount);
+    }
+
+    /// <inheritdoc />
+    public void CloseFile(string filePath)
+    {
+        if (_lineIndexCache.TryRemove(filePath, out var cacheEntry))
+        {
+            cacheEntry.Index.Dispose();
+        }
     }
 
     /// <summary>
@@ -329,7 +338,10 @@ public class FileService : IFileService
     /// <summary>
     /// Count the number of lines in a string. An empty string has 1 line.
     /// Lines are delimited by \n, \r\n, or \r.
+    /// This is a test utility — not used in production code paths.
+    /// Production line counting is performed via byte scanning in OpenFileAsync.
     /// </summary>
+    [Obsolete("Test utility only — not used in production code paths.")]
     internal static int CountLines(string content)
     {
         if (string.IsNullOrEmpty(content))

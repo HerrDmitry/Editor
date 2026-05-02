@@ -96,8 +96,10 @@ public class MockFileService : IFileService
             filePath, FileName, 100, FileSizeBytes, "UTF-8");
     }
 
-    public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+    public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(new LinesResult(startLine, new[] { "line1" }, 100));
     }
+
+    public void CloseFile(string filePath) { }
 }

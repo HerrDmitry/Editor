@@ -159,8 +159,10 @@ public class PartialResponseFlowUnitTests
             return Task.FromResult(_finalMetadata);
         }
 
-        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
             => Task.FromResult(new LinesResult(startLine, new[] { "line" }, 100));
+
+        public void CloseFile(string filePath) { }
     }
 
     /// <summary>
@@ -198,7 +200,9 @@ public class PartialResponseFlowUnitTests
             return new FileOpenMetadata(filePath, Path.GetFileName(filePath), 50, 2000, "UTF-8");
         }
 
-        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount)
+        public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
             => Task.FromResult(new LinesResult(startLine, new[] { "line" }, 50));
+
+        public void CloseFile(string filePath) { }
     }
 }

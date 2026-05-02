@@ -36,7 +36,7 @@ internal readonly struct Block
 /// anchor offset and delta-encoded offsets for remaining lines using the
 /// narrowest integer type that fits.
 /// </summary>
-public sealed class CompressedLineIndex
+public sealed class CompressedLineIndex : IDisposable
 {
     /// <summary>
     /// Default number of lines per block.
@@ -437,6 +437,16 @@ public sealed class CompressedLineIndex
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Disposes the internal <see cref="ReaderWriterLockSlim"/> if one was created
+    /// via <see cref="EnableConcurrentAccess"/>. Safe to call even if no lock exists.
+    /// </summary>
+    public void Dispose()
+    {
+        _rwLock?.Dispose();
+        _rwLock = null;
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text;
 using EditorApp.Models;
@@ -531,25 +532,20 @@ public class FileServiceProperties
             // Use reflection to get the full index, extract first N offsets,
             // build a partial CompressedLineIndex, and replace the cache entry.
             var cacheField = typeof(FileService).GetField("_lineIndexCache", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            var cache = (Dictionary<string, CompressedLineIndex>)cacheField.GetValue(sut)!;
+            var cache = (ConcurrentDictionary<string, CacheEntry>)cacheField.GetValue(sut)!;
 
-            var lockField = typeof(FileService).GetField("_indexLock", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            var indexLock = lockField.GetValue(sut)!;
+            var fullEntry = cache[path];
+            var fullIndex = fullEntry.Index;
 
-            lock (indexLock)
+            // Build a partial index with only the first N offsets
+            var partialIndex = new CompressedLineIndex();
+            for (int i = 0; i < n; i++)
             {
-                var fullIndex = cache[path];
-
-                // Build a partial index with only the first N offsets
-                var partialIndex = new CompressedLineIndex();
-                for (int i = 0; i < n; i++)
-                {
-                    partialIndex.AddOffset(fullIndex.GetOffset(i));
-                }
-                partialIndex.Seal();
-
-                cache[path] = partialIndex;
+                partialIndex.AddOffset(fullIndex.GetOffset(i));
             }
+            partialIndex.Seal();
+
+            cache[path] = fullEntry with { Index = partialIndex };
 
             // Call ReadLinesAsync with arbitrary startLine and requestCount
             var result = sut.ReadLinesAsync(path, startLine, requestCount).GetAwaiter().GetResult();
