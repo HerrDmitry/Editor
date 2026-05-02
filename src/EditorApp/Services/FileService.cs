@@ -16,6 +16,12 @@ internal record CacheEntry(CompressedLineIndex Index, Encoding Encoding, long Fi
 public class FileService : IFileService
 {
     /// <summary>
+    /// Event raised when ReadLinesAsync detects a stale file.
+    /// PhotinoHostService subscribes to trigger refresh cycle.
+    /// </summary>
+    public event Action<string>? OnStaleFileDetected;
+
+    /// <summary>
     /// Files larger than this threshold (in bytes) will report progress during scanning.
     /// </summary>
     public const long SizeThresholdBytes = 256_000;
@@ -24,6 +30,18 @@ public class FileService : IFileService
     /// Minimum milliseconds between progress reports to avoid flooding the message bridge.
     /// </summary>
     private const int ProgressThrottleMs = 50;
+
+    /// <summary>
+    /// Tracks the last time OnStaleFileDetected was fired per file path,
+    /// to avoid flooding the event on every ReadLinesAsync call.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, long> _lastStaleEventTime = new();
+
+    /// <summary>
+    /// Minimum interval between stale detection events for the same file (ms).
+    /// Must be longer than debounce window to avoid feedback loop.
+    /// </summary>
+    private const int StaleEventThrottleMs = 2000;
 
     /// <summary>
     /// Cache of line offset indices and metadata keyed by file path.
@@ -75,7 +93,7 @@ public class FileService : IFileService
             progress.Report(new FileLoadProgress(fileInfo.Name, 0, fileSize));
         }
 
-        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 65536);
 
         // Skip BOM if present
         if (bomLength > 0)
@@ -181,7 +199,11 @@ public class FileService : IFileService
         // Seal the index — finalizes any remaining partial block
         index.Seal();
 
-        // Store index for later ReadLinesAsync calls
+        // Store index for later ReadLinesAsync calls — dispose old entry if different
+        if (_lineIndexCache.TryGetValue(filePath, out var previousEntry) && previousEntry.Index != index)
+        {
+            previousEntry.Index.Dispose();
+        }
         _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc);
 
         // Total lines = number of line start offsets
@@ -199,6 +221,36 @@ public class FileService : IFileService
     }
 
     /// <inheritdoc />
+    public async Task<FileOpenMetadata> RefreshFileAsync(
+        string filePath,
+        IProgress<FileLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        // Quick check: skip re-scan if file hasn't actually changed since last cache entry.
+        // This prevents redundant full scans when debounce fires but file is unchanged,
+        // and breaks the stale-detection → refresh feedback loop.
+        if (_lineIndexCache.TryGetValue(filePath, out var existing))
+        {
+            var fi = new FileInfo(filePath);
+            if (fi.Exists && fi.Length == existing.FileSize && fi.LastWriteTimeUtc == existing.LastWriteTimeUtc)
+            {
+                // File unchanged — return current metadata without re-scanning
+                var encodingName = GetEncodingDisplayName(existing.Encoding);
+                return new FileOpenMetadata(
+                    filePath,
+                    fi.Name,
+                    existing.Index.LineCount,
+                    existing.FileSize,
+                    encodingName
+                );
+            }
+        }
+
+        // OpenFileAsync handles old index disposal via cache swap
+        return await OpenFileAsync(filePath, onPartialMetadata: null, progress, cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
     {
         int snapshotCount;
@@ -213,13 +265,18 @@ public class FileService : IFileService
             throw new InvalidOperationException($"File has not been opened: {filePath}");
         }
 
-        // Stale file detection — verify file hasn't been modified since OpenFileAsync
+        // Stale file detection — if file modified since OpenFileAsync, fire event (throttled) and serve from existing cache
         var currentFileInfo = new FileInfo(filePath);
         if (currentFileInfo.Length != cacheEntry.FileSize ||
             currentFileInfo.LastWriteTimeUtc != cacheEntry.LastWriteTimeUtc)
         {
-            throw new InvalidOperationException(
-                $"File has been modified since it was opened: {filePath}");
+            var now = Environment.TickCount64;
+            var lastFired = _lastStaleEventTime.GetOrAdd(filePath, 0L);
+            if (now - lastFired >= StaleEventThrottleMs)
+            {
+                _lastStaleEventTime[filePath] = now;
+                OnStaleFileDetected?.Invoke(filePath);
+            }
         }
 
         var index = cacheEntry.Index;
@@ -248,7 +305,7 @@ public class FileService : IFileService
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         stream.Seek(startOffset, SeekOrigin.Begin);
         using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
 
@@ -264,6 +321,7 @@ public class FileService : IFileService
     /// <inheritdoc />
     public void CloseFile(string filePath)
     {
+        _lastStaleEventTime.TryRemove(filePath, out _);
         if (_lineIndexCache.TryRemove(filePath, out var cacheEntry))
         {
             cacheEntry.Index.Dispose();

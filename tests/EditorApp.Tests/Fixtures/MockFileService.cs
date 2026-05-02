@@ -96,6 +96,14 @@ public class MockFileService : IFileService
             filePath, FileName, 100, FileSizeBytes, "UTF-8");
     }
 
+    public Task<FileOpenMetadata> RefreshFileAsync(
+        string filePath,
+        IProgress<FileLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        return OpenFileAsync(filePath, onPartialMetadata: null, progress, cancellationToken);
+    }
+
     public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(new LinesResult(startLine, new[] { "line1" }, 100));

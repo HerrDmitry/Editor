@@ -55,6 +55,9 @@ public class FileOpenedResponse : IMessage
 
     [JsonPropertyName("isPartial")]
     public bool IsPartial { get; set; }
+
+    [JsonPropertyName("isRefresh")]
+    public bool IsRefresh { get; set; }
 }
 
 /// <summary>

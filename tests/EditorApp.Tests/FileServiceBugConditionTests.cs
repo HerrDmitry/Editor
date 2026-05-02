@@ -81,25 +81,29 @@ public class FileServiceBugConditionTests : IDisposable
 
     /// <summary>
     /// 1.3 Stale offset read:
-    /// ReadLinesAsync should throw when file is modified after open.
-    /// On unfixed code, no exception is thrown → test FAILS.
+    /// ReadLinesAsync should fire OnStaleFileDetected and serve old data when file is modified after open.
+    /// Previously threw InvalidOperationException; now triggers refresh event instead.
     /// </summary>
     [Fact]
-    public async Task ReadLinesAsync_ShouldThrowWhenFileModifiedSinceOpen()
+    public async Task ReadLinesAsync_ShouldFireStaleEventWhenFileModifiedSinceOpen()
     {
-        // Validates: Requirements 1.3
+        // Validates: Requirements 7.1, 7.3 (external-file-refresh)
         var service = new FileService();
         var path = CreateTempFile("Line 1\nLine 2\nLine 3");
 
         await service.OpenFileAsync(path);
 
+        string? detectedPath = null;
+        service.OnStaleFileDetected += (p) => detectedPath = p;
+
         // Modify file externally (append content to change size/timestamp)
         await Task.Delay(50); // Ensure timestamp differs
         File.AppendAllText(path, "\nLine 4\nLine 5");
 
-        // On unfixed code: no exception thrown, reads stale data silently → FAILS
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => service.ReadLinesAsync(path, 0, 3));
+        // Should NOT throw — serves old data and fires event
+        var result = await service.ReadLinesAsync(path, 0, 3);
+        Assert.Equal(3, result.Lines.Length);
+        Assert.Equal(path, detectedPath);
     }
 
     /// <summary>
