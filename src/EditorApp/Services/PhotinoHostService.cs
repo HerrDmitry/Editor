@@ -24,9 +24,49 @@ public class PhotinoHostService
     private CancellationTokenSource? _scanCts;
 
     /// <summary>
+    /// Cancellation token source for the current refresh operation.
+    /// Separate from _scanCts so file-open and refresh don't interfere.
+    /// Cancelled on shutdown or when opening a different file.
+    /// </summary>
+    private CancellationTokenSource? _refreshCts;
+
+    /// <summary>
+    /// Master shutdown token — cancelled in Shutdown() to stop all background work.
+    /// </summary>
+    private readonly CancellationTokenSource _shutdownCts = new();
+
+    /// <summary>
     /// Path of the currently open file, used by HandleRequestLinesAsync.
     /// </summary>
     private string? _currentFilePath;
+
+    /// <summary>
+    /// Watches the currently open file for external modifications.
+    /// </summary>
+    private FileSystemWatcher? _fileWatcher;
+
+    /// <summary>
+    /// Debounce timer — coalesces rapid file change events into a single refresh.
+    /// </summary>
+    private System.Threading.Timer? _debounceTimer;
+
+    /// <summary>
+    /// Debounce window in milliseconds for file change events.
+    /// </summary>
+    private const int DebounceMs = 500;
+
+    /// <summary>
+    /// Guard flag — 1 while a refresh cycle is executing, 0 otherwise.
+    /// Prevents same-file change notifications from cancelling in-progress refresh.
+    /// Uses Interlocked for thread-safe access.
+    /// </summary>
+    private int _refreshInProgress;
+
+    /// <summary>
+    /// Set to true when a change notification arrives while _refreshInProgress is true.
+    /// After the current refresh completes, a new debounce cycle starts.
+    /// </summary>
+    private volatile bool _pendingRefresh;
 
     public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService)
     {
@@ -64,9 +104,14 @@ public class PhotinoHostService
     /// </summary>
     public void Shutdown()
     {
-        // Photino.Blazor handles native resource cleanup when the window closes.
-        // This method exists as an explicit lifecycle hook for future use
-        // (e.g., saving state, flushing logs).
+        // Signal all background work to stop
+        _shutdownCts.Cancel();
+        _refreshCts?.Cancel();
+        _scanCts?.Cancel();
+        StopWatching();
+        _shutdownCts.Dispose();
+        _refreshCts?.Dispose();
+        _scanCts?.Dispose();
     }
 
     /// <summary>
@@ -88,6 +133,19 @@ public class PhotinoHostService
     {
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
         _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
+
+        // Subscribe to stale file detection — route through debounced refresh
+        if (_fileService is FileService fs)
+        {
+            fs.OnStaleFileDetected += (path) =>
+            {
+                if (path == _currentFilePath)
+                {
+                    OnFileChanged(this, new FileSystemEventArgs(WatcherChangeTypes.Changed,
+                        Path.GetDirectoryName(path)!, Path.GetFileName(path)));
+                }
+            };
+        }
     }
 
     /// <summary>
@@ -117,12 +175,13 @@ public class PhotinoHostService
     {
         try
         {
-            // Cancel any existing scan in progress (Requirement 9.1)
-            if (_scanCts is not null)
-            {
-                _scanCts.Cancel();
-                _scanCts.Dispose();
-            }
+            // Cancel any existing scan or refresh in progress
+            _scanCts?.Cancel();
+            _scanCts?.Dispose();
+            _refreshCts?.Cancel();
+            _refreshCts?.Dispose();
+            _refreshCts = null;
+            _pendingRefresh = false;
 
             // Create new CancellationTokenSource for this scan
             _scanCts = new CancellationTokenSource();
@@ -157,6 +216,9 @@ public class PhotinoHostService
 
             // Store current file path for subsequent ReadLinesAsync calls
             _currentFilePath = filePath;
+
+            // Start watching for external modifications
+            StartWatching(filePath);
 
             // Send final metadata to the UI (scan complete)
             await _messageRouter.SendToUIAsync(new FileOpenedResponse
@@ -261,5 +323,151 @@ public class PhotinoHostService
                 Details = ex.Message
             });
         }
+    }
+
+    /// <summary>
+    /// Start watching the given file path. Disposes previous watcher if any.
+    /// </summary>
+    private void StartWatching(string filePath)
+    {
+        StopWatching();
+        var dir = Path.GetDirectoryName(filePath)!;
+        var name = Path.GetFileName(filePath);
+        try
+        {
+            _fileWatcher = new FileSystemWatcher(dir, name)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+                EnableRaisingEvents = true
+            };
+            _fileWatcher.Changed += OnFileChanged;
+            _fileWatcher.Error += OnWatcherError;
+        }
+        catch (Exception ex)
+        {
+            // Watcher creation can fail for non-existent directories, network paths, etc.
+            // Stale detection in ReadLinesAsync serves as fallback (Requirement 1.5).
+            Console.Error.WriteLine($"[WARN] Could not start file watcher: {ex.Message}");
+            _fileWatcher = null;
+        }
+    }
+
+    /// <summary>
+    /// Stop watching and dispose watcher resources.
+    /// </summary>
+    private void StopWatching()
+    {
+        if (_fileWatcher is not null)
+        {
+            _fileWatcher.EnableRaisingEvents = false;
+            _fileWatcher.Changed -= OnFileChanged;
+            _fileWatcher.Error -= OnWatcherError;
+            _fileWatcher.Dispose();
+            _fileWatcher = null;
+        }
+        _debounceTimer?.Dispose();
+        _debounceTimer = null;
+    }
+
+    /// <summary>
+    /// FSW changed handler — reset debounce timer.
+    /// </summary>
+    private void OnFileChanged(object sender, FileSystemEventArgs e)
+    {
+        if (_shutdownCts.IsCancellationRequested) return;
+        _debounceTimer?.Dispose();
+        _debounceTimer = new System.Threading.Timer(
+            _ => _ = OnDebouncedFileChange(),
+            null,
+            DebounceMs,
+            Timeout.Infinite);
+    }
+
+    /// <summary>
+    /// Debounce elapsed — trigger refresh cycle.
+    /// Uses Interlocked guard to prevent overlapping refreshes.
+    /// Same-file change notifications do NOT cancel an in-progress refresh;
+    /// instead _pendingRefresh is set and a new cycle starts after completion.
+    /// Only OpenFileByPathAsync (different file) cancels via _refreshCts.
+    /// </summary>
+    private async Task OnDebouncedFileChange()
+    {
+        if (_shutdownCts.IsCancellationRequested) return;
+        if (string.IsNullOrEmpty(_currentFilePath)) return;
+
+        // If refresh already running, mark pending and return.
+        if (Interlocked.CompareExchange(ref _refreshInProgress, 1, 0) != 0)
+        {
+            _pendingRefresh = true;
+            return;
+        }
+
+        try
+        {
+            // Create a dedicated CTS for this refresh, linked to shutdown.
+            _refreshCts?.Dispose();
+            _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+
+            var metadata = await _fileService.RefreshFileAsync(
+                _currentFilePath, progress: null, _refreshCts.Token);
+
+            if (!_shutdownCts.IsCancellationRequested)
+            {
+                await _messageRouter.SendToUIAsync(new FileOpenedResponse
+                {
+                    FileName = metadata.FileName,
+                    TotalLines = metadata.TotalLines,
+                    FileSizeBytes = metadata.FileSizeBytes,
+                    Encoding = metadata.Encoding,
+                    IsPartial = false,
+                    IsRefresh = true
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled — shutdown or new file opened. Silent.
+        }
+        catch (FileNotFoundException)
+        {
+            if (!_shutdownCts.IsCancellationRequested)
+            {
+                await _messageRouter.SendToUIAsync(new ErrorResponse
+                {
+                    ErrorCode = Models.ErrorCode.FILE_NOT_FOUND.ToString(),
+                    Message = "The file has been deleted or moved.",
+                    Details = _currentFilePath
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Refresh failed: {ex}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshInProgress, 0);
+
+            // If a change arrived while we were refreshing, start a new debounce cycle.
+            if (_pendingRefresh && !_shutdownCts.IsCancellationRequested)
+            {
+                _pendingRefresh = false;
+                _debounceTimer?.Dispose();
+                _debounceTimer = new System.Threading.Timer(
+                    _ => _ = OnDebouncedFileChange(),
+                    null,
+                    DebounceMs,
+                    Timeout.Infinite);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Watcher error — could indicate network drive disconnect, etc.
+    /// Fall back to stale detection in ReadLinesAsync as fallback.
+    /// </summary>
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        Console.Error.WriteLine($"[WARN] FileSystemWatcher error: {e.GetException()}");
     }
 }

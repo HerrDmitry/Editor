@@ -8,6 +8,7 @@ interface FileMeta {
   fileSizeBytes: number;
   encoding: string;
   isPartial: boolean;
+  isRefresh: boolean;
 }
 
 interface LinesResponsePayload {
@@ -27,6 +28,9 @@ interface FileLoadProgressPayload {
   percent: number;
   fileSizeBytes: number;
 }
+
+/** Lines to request from backend per fetch (matches ContentArea FETCH_SIZE). */
+const APP_FETCH_SIZE = 200;
 
 function App() {
   const [fileMeta, setFileMeta] = React.useState<FileMeta | null>(null);
@@ -85,6 +89,38 @@ function App() {
     interopRef.current = interop;
 
     interop.onFileOpened((data: FileMeta) => {
+      if (data.isRefresh) {
+        // Refresh — preserve scroll position, re-request buffer
+        const currentStart = linesStartRef.current;
+        const currentCount = linesRef.current ? linesRef.current.length : 0;
+
+        // Update metadata (totalLines may have changed)
+        setFileMeta(data);
+        setError(null);
+
+        if (data.totalLines === 0) {
+          // File emptied
+          setLines(null);
+          setLinesStartLine(0);
+          return;
+        }
+
+        // Clamp if file shrunk past current position
+        let newStart = currentStart;
+        const bufferLen = Math.max(currentCount, APP_FETCH_SIZE);
+        if (newStart >= data.totalLines) {
+          newStart = Math.max(0, data.totalLines - bufferLen);
+          setLinesStartLine(newStart);
+        }
+
+        // Re-request current buffer range
+        const count = Math.min(bufferLen, data.totalLines - newStart);
+        lastRequestedStartRef.current = newStart;
+        isJumpRequestRef.current = true; // Replace buffer entirely
+        interop.sendRequestLines(newStart, count);
+        return;
+      }
+
       if (data.isPartial) {
         // Partial metadata — show content immediately
         setFileMeta(data);

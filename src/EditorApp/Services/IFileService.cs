@@ -28,6 +28,15 @@ public interface IFileService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Re-scan a previously opened file to rebuild its line index after external modification.
+    /// Old CacheEntry remains valid for reads until new index is ready.
+    /// </summary>
+    Task<FileOpenMetadata> RefreshFileAsync(
+        string filePath,
+        IProgress<FileLoadProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Read a range of lines from a previously opened file using the line offset index.
     /// </summary>
     Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default);

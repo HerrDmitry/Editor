@@ -106,6 +106,9 @@ public class ErrorHaltsProgressPropertyTests
         public Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default)
             => Task.FromResult(new LinesResult(startLine, new[] { "line" }, 100));
 
+        public Task<FileOpenMetadata> RefreshFileAsync(string filePath, IProgress<FileLoadProgress>? progress = null, CancellationToken cancellationToken = default)
+            => OpenFileAsync(filePath, onPartialMetadata: null, progress, cancellationToken);
+
         public void CloseFile(string filePath) { }
     }
 }
