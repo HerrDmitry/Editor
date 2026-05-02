@@ -30,5 +30,11 @@ public interface IFileService
     /// <summary>
     /// Read a range of lines from a previously opened file using the line offset index.
     /// </summary>
-    Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount);
+    Task<LinesResult> ReadLinesAsync(string filePath, int startLine, int lineCount, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Remove a file from the line index cache and dispose its resources.
+    /// No-op if the file is not in the cache.
+    /// </summary>
+    void CloseFile(string filePath);
 }
