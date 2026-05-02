@@ -23,7 +23,7 @@ public class FileService : IFileService
     /// Cache of line offset indices keyed by file path.
     /// Each list contains the byte offset of the start of each line.
     /// </summary>
-    private readonly Dictionary<string, List<long>> _lineIndexCache = new();
+    private readonly Dictionary<string, CompressedLineIndex> _lineIndexCache = new();
 
     /// <summary>
     /// Lock protecting concurrent access to <see cref="_lineIndexCache"/> entries
@@ -66,7 +66,7 @@ public class FileService : IFileService
         // Scan file to build line offset index by reading raw bytes.
         // We cannot use StreamReader for this because its internal buffer
         // causes stream.Position to be inaccurate after ReadLine().
-        var lineOffsets = new List<long>();
+        var index = new CompressedLineIndex();
         var bomLength = GetBomLength(encoding);
 
         // Report initial progress for large files
@@ -85,7 +85,7 @@ public class FileService : IFileService
             }
 
             // First line starts after BOM (or at 0 if no BOM)
-            lineOffsets.Add(stream.Position);
+            index.AddOffset(stream.Position);
 
             var buffer = new byte[65536];
             int bytesRead;
@@ -108,28 +108,14 @@ public class FileService : IFileService
                     {
                         // \n or the \n part of \r\n — new line starts after this byte
                         long nextLineOffset = stream.Position - bytesRead + i + 1;
-                        if (partialEmitted)
-                        {
-                            lock (_indexLock) { lineOffsets.Add(nextLineOffset); }
-                        }
-                        else
-                        {
-                            lineOffsets.Add(nextLineOffset);
-                        }
+                        index.AddOffset(nextLineOffset);
                         prevWasCR = false;
                     }
                     else if (prevWasCR)
                     {
                         // Previous byte was \r but this byte is not \n — standalone \r line ending
                         long nextLineOffset = stream.Position - bytesRead + i;
-                        if (partialEmitted)
-                        {
-                            lock (_indexLock) { lineOffsets.Add(nextLineOffset); }
-                        }
-                        else
-                        {
-                            lineOffsets.Add(nextLineOffset);
-                        }
+                        index.AddOffset(nextLineOffset);
                         prevWasCR = (b == (byte)'\r');
                     }
                     else
@@ -141,16 +127,18 @@ public class FileService : IFileService
                 // Check if threshold crossed — emit partial metadata once
                 if (totalBytesRead >= SizeThresholdBytes && !partialEmitted)
                 {
+                    index.EnableConcurrentAccess();
+
                     lock (_indexLock)
                     {
-                        _lineIndexCache[filePath] = lineOffsets;
+                        _lineIndexCache[filePath] = index;
                     }
 
                     var partialEncodingName = GetEncodingDisplayName(encoding);
                     onPartialMetadata?.Invoke(new FileOpenMetadata(
                         filePath,
                         fileInfo.Name,
-                        lineOffsets.Count,
+                        index.LineCount,
                         fileInfo.Length,
                         partialEncodingName
                     ));
@@ -174,13 +162,17 @@ public class FileService : IFileService
             // Handle trailing \r at end of file
             if (prevWasCR)
             {
-                if (partialEmitted)
+                index.AddOffset(stream.Length);
+            }
+
+            // Remove trailing offset that points to EOF — a file ending with a
+            // newline does not create an additional empty line.
+            if (index.LineCount > 1)
+            {
+                int lastLine = index.LineCount - 1;
+                if (index.GetOffset(lastLine) == stream.Length)
                 {
-                    lock (_indexLock) { lineOffsets.Add(stream.Length); }
-                }
-                else
-                {
-                    lineOffsets.Add(stream.Length);
+                    index.RemoveLastOffset();
                 }
             }
         }
@@ -195,21 +187,17 @@ public class FileService : IFileService
             progress.Report(new FileLoadProgress(fileInfo.Name, 100, fileSize));
         }
 
-        // If the last offset equals the file length and the file doesn't end with a newline,
-        // remove it (it's the EOF marker, not a real line start)
-        if (lineOffsets.Count > 1 && lineOffsets[lineOffsets.Count - 1] == fileInfo.Length)
-        {
-            lineOffsets.RemoveAt(lineOffsets.Count - 1);
-        }
+        // Seal the index — finalizes any remaining partial block
+        index.Seal();
 
         // Store index for later ReadLinesAsync calls
         lock (_indexLock)
         {
-            _lineIndexCache[filePath] = lineOffsets;
+            _lineIndexCache[filePath] = index;
         }
 
         // Total lines = number of line start offsets
-        var totalLines = lineOffsets.Count;
+        var totalLines = index.LineCount;
 
         var encodingName = GetEncodingDisplayName(encoding);
 
@@ -231,12 +219,12 @@ public class FileService : IFileService
         // Acquire lock → snapshot index count and needed offset → release lock before I/O
         lock (_indexLock)
         {
-            if (!_lineIndexCache.TryGetValue(filePath, out var lineOffsets))
+            if (!_lineIndexCache.TryGetValue(filePath, out var index))
             {
                 throw new InvalidOperationException($"File has not been opened: {filePath}");
             }
 
-            snapshotCount = lineOffsets.Count;
+            snapshotCount = index.LineCount;
 
             // Clamp startLine
             if (startLine < 0) startLine = 0;
@@ -253,7 +241,7 @@ public class FileService : IFileService
             }
 
             // Copy needed offset value while holding lock
-            startOffset = lineOffsets[startLine];
+            startOffset = index.GetOffset(startLine);
             lineCount = clampedCount;
         }
 
