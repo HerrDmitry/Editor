@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Activate Caveman",
+  "description": "Automatically activates the caveman skill at the start of every agent interaction",
+  "version": "1",
+  "when": {
+    "type": "promptSubmit"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Activate the caveman skill if it is not already active. Use the discloseContext tool with name 'caveman' to activate it."
+  }
+}

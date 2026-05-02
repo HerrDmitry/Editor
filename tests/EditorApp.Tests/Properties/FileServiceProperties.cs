@@ -528,19 +528,27 @@ public class FileServiceProperties
             // First, open file fully to build the complete index
             sut.OpenFileAsync(path).GetAwaiter().GetResult();
 
-            // Use reflection to replace the cached index with a partial one (first N offsets)
+            // Use reflection to get the full index, extract first N offsets,
+            // build a partial CompressedLineIndex, and replace the cache entry.
             var cacheField = typeof(FileService).GetField("_lineIndexCache", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            var cache = (Dictionary<string, List<long>>)cacheField.GetValue(sut)!;
+            var cache = (Dictionary<string, CompressedLineIndex>)cacheField.GetValue(sut)!;
 
-            List<long> partialOffsets;
             var lockField = typeof(FileService).GetField("_indexLock", BindingFlags.NonPublic | BindingFlags.Instance)!;
             var indexLock = lockField.GetValue(sut)!;
 
             lock (indexLock)
             {
-                var fullOffsets = cache[path];
-                partialOffsets = fullOffsets.Take(n).ToList();
-                cache[path] = partialOffsets;
+                var fullIndex = cache[path];
+
+                // Build a partial index with only the first N offsets
+                var partialIndex = new CompressedLineIndex();
+                for (int i = 0; i < n; i++)
+                {
+                    partialIndex.AddOffset(fullIndex.GetOffset(i));
+                }
+                partialIndex.Seal();
+
+                cache[path] = partialIndex;
             }
 
             // Call ReadLinesAsync with arbitrary startLine and requestCount
