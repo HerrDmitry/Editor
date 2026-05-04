@@ -18,8 +18,23 @@ public class PhotinoHostService
     private readonly IFileService _fileService;
 
     /// <summary>
+    /// Lock for all _refreshCts and _scanCts dispose/create operations.
+    /// Prevents ObjectDisposedException when concurrent threads access CTS.
+    /// (Fix 9.1: CTS synchronization)
+    /// </summary>
+    private readonly object _ctsLock = new();
+
+    /// <summary>
+    /// Lock for _debounceTimer dispose/create operations.
+    /// Uses replace-then-dispose pattern to prevent timer callback race.
+    /// (Fix 9.4: Timer synchronization)
+    /// </summary>
+    private readonly object _timerLock = new();
+
+    /// <summary>
     /// Cancellation token source for the current file scan operation.
     /// Cancelled when a new file is opened while a scan is in progress.
+    /// Guarded by _ctsLock.
     /// </summary>
     private CancellationTokenSource? _scanCts;
 
@@ -27,6 +42,7 @@ public class PhotinoHostService
     /// Cancellation token source for the current refresh operation.
     /// Separate from _scanCts so file-open and refresh don't interfere.
     /// Cancelled on shutdown or when opening a different file.
+    /// Guarded by _ctsLock.
     /// </summary>
     private CancellationTokenSource? _refreshCts;
 
@@ -37,8 +53,9 @@ public class PhotinoHostService
 
     /// <summary>
     /// Path of the currently open file, used by HandleRequestLinesAsync.
+    /// Marked volatile to ensure visibility across threads (Fix 9.2).
     /// </summary>
-    private string? _currentFilePath;
+    private volatile string? _currentFilePath;
 
     /// <summary>
     /// Watches the currently open file for external modifications.
@@ -47,6 +64,7 @@ public class PhotinoHostService
 
     /// <summary>
     /// Debounce timer — coalesces rapid file change events into a single refresh.
+    /// Guarded by _timerLock.
     /// </summary>
     private System.Threading.Timer? _debounceTimer;
 
@@ -67,6 +85,12 @@ public class PhotinoHostService
     /// After the current refresh completes, a new debounce cycle starts.
     /// </summary>
     private volatile bool _pendingRefresh;
+
+    /// <summary>
+    /// Stored delegate for OnStaleFileDetected subscription so we can unsubscribe in Shutdown.
+    /// (Fix 9.3: Event unsubscription)
+    /// </summary>
+    private Action<string>? _staleFileHandler;
 
     public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService)
     {
@@ -106,12 +130,27 @@ public class PhotinoHostService
     {
         // Signal all background work to stop
         _shutdownCts.Cancel();
-        _refreshCts?.Cancel();
-        _scanCts?.Cancel();
+
+        lock (_ctsLock)
+        {
+            _refreshCts?.Cancel();
+            _refreshCts?.Dispose();
+            _refreshCts = null;
+            _scanCts?.Cancel();
+            _scanCts?.Dispose();
+            _scanCts = null;
+        }
+
         StopWatching();
+
+        // Unsubscribe from stale file detection event (Fix 9.3)
+        if (_fileService is FileService fs && _staleFileHandler is not null)
+        {
+            fs.OnStaleFileDetected -= _staleFileHandler;
+            _staleFileHandler = null;
+        }
+
         _shutdownCts.Dispose();
-        _refreshCts?.Dispose();
-        _scanCts?.Dispose();
     }
 
     /// <summary>
@@ -134,10 +173,11 @@ public class PhotinoHostService
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
         _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
 
-        // Subscribe to stale file detection — route through debounced refresh
+        // Subscribe to stale file detection — route through debounced refresh.
+        // Store delegate reference so Shutdown can unsubscribe (Fix 9.3).
         if (_fileService is FileService fs)
         {
-            fs.OnStaleFileDetected += (path) =>
+            _staleFileHandler = (path) =>
             {
                 if (path == _currentFilePath)
                 {
@@ -145,6 +185,7 @@ public class PhotinoHostService
                         Path.GetDirectoryName(path)!, Path.GetFileName(path)));
                 }
             };
+            fs.OnStaleFileDetected += _staleFileHandler;
         }
     }
 
@@ -175,18 +216,28 @@ public class PhotinoHostService
     {
         try
         {
-            // Cancel any existing scan or refresh in progress
-            _scanCts?.Cancel();
-            _scanCts?.Dispose();
-            _refreshCts?.Cancel();
-            _refreshCts?.Dispose();
-            _refreshCts = null;
+            // Clear path at start — prevents stale path if scan fails (Fix 9.5)
+            _currentFilePath = null;
+
+            // Cancel any existing scan or refresh in progress (Fix 9.1: under lock)
+            lock (_ctsLock)
+            {
+                _scanCts?.Cancel();
+                _scanCts?.Dispose();
+                _refreshCts?.Cancel();
+                _refreshCts?.Dispose();
+                _refreshCts = null;
+            }
             _pendingRefresh = false;
 
             // Create new CancellationTokenSource for this scan
-            _scanCts = new CancellationTokenSource();
+            lock (_ctsLock)
+            {
+                _scanCts = new CancellationTokenSource();
+            }
 
-            // Create progress reporter that forwards to UI via MessageRouter
+            // Progress<T> callback runs on thread pool. SendToUIAsync is thread-safe
+            // (stateless, delegates to Photino native SendWebMessage). (Fix 9.6)
             var progress = new Progress<FileLoadProgress>(p =>
             {
                 _ = _messageRouter.SendToUIAsync(new FileLoadProgressMessage
@@ -197,10 +248,10 @@ public class PhotinoHostService
                 });
             });
 
-            // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early
+            // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early.
+            // Path is NOT set here — only on success after scan completes (Fix 9.5).
             Action<FileOpenMetadata> onPartialMetadata = (partialMeta) =>
             {
-                _currentFilePath = filePath;
                 _ = _messageRouter.SendToUIAsync(new FileOpenedResponse
                 {
                     FileName = partialMeta.FileName,
@@ -211,10 +262,16 @@ public class PhotinoHostService
                 });
             };
 
-            // Scan the file to build line offset index and get metadata
-            var metadata = await _fileService.OpenFileAsync(filePath, onPartialMetadata, progress, _scanCts.Token);
+            CancellationToken scanToken;
+            lock (_ctsLock)
+            {
+                scanToken = _scanCts?.Token ?? CancellationToken.None;
+            }
 
-            // Store current file path for subsequent ReadLinesAsync calls
+            // Scan the file to build line offset index and get metadata
+            var metadata = await _fileService.OpenFileAsync(filePath, onPartialMetadata, progress, scanToken);
+
+            // Store current file path only on success (Fix 9.5)
             _currentFilePath = filePath;
 
             // Start watching for external modifications
@@ -337,7 +394,8 @@ public class PhotinoHostService
         {
             _fileWatcher = new FileSystemWatcher(dir, name)
             {
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+                // Only LastWrite — Size unsupported on some platforms (Fix 9.7)
+                NotifyFilter = NotifyFilters.LastWrite,
                 EnableRaisingEvents = true
             };
             _fileWatcher.Changed += OnFileChanged;
@@ -365,22 +423,36 @@ public class PhotinoHostService
             _fileWatcher.Dispose();
             _fileWatcher = null;
         }
-        _debounceTimer?.Dispose();
-        _debounceTimer = null;
+
+        // Dispose timer under lock (Fix 9.4)
+        System.Threading.Timer? oldTimer;
+        lock (_timerLock)
+        {
+            oldTimer = _debounceTimer;
+            _debounceTimer = null;
+        }
+        oldTimer?.Dispose();
     }
 
     /// <summary>
     /// FSW changed handler — reset debounce timer.
+    /// Uses replace-then-dispose pattern under lock (Fix 9.4).
     /// </summary>
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
         if (_shutdownCts.IsCancellationRequested) return;
-        _debounceTimer?.Dispose();
-        _debounceTimer = new System.Threading.Timer(
-            _ => _ = OnDebouncedFileChange(),
-            null,
-            DebounceMs,
-            Timeout.Infinite);
+
+        System.Threading.Timer? oldTimer;
+        lock (_timerLock)
+        {
+            oldTimer = _debounceTimer;
+            _debounceTimer = new System.Threading.Timer(
+                _ => _ = OnDebouncedFileChange(),
+                null,
+                DebounceMs,
+                Timeout.Infinite);
+        }
+        oldTimer?.Dispose();
     }
 
     /// <summary>
@@ -404,12 +476,18 @@ public class PhotinoHostService
 
         try
         {
-            // Create a dedicated CTS for this refresh, linked to shutdown.
-            _refreshCts?.Dispose();
-            _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+            CancellationToken refreshToken;
+
+            // Create a dedicated CTS for this refresh, linked to shutdown (Fix 9.1: under lock).
+            lock (_ctsLock)
+            {
+                _refreshCts?.Dispose();
+                _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+                refreshToken = _refreshCts.Token;
+            }
 
             var metadata = await _fileService.RefreshFileAsync(
-                _currentFilePath, progress: null, _refreshCts.Token);
+                _currentFilePath, progress: null, refreshToken);
 
             if (!_shutdownCts.IsCancellationRequested)
             {
@@ -448,16 +526,21 @@ public class PhotinoHostService
         {
             Interlocked.Exchange(ref _refreshInProgress, 0);
 
-            // If a change arrived while we were refreshing, start a new debounce cycle.
+            // If a change arrived while we were refreshing, start a new debounce cycle (Fix 9.4: under lock).
             if (_pendingRefresh && !_shutdownCts.IsCancellationRequested)
             {
                 _pendingRefresh = false;
-                _debounceTimer?.Dispose();
-                _debounceTimer = new System.Threading.Timer(
-                    _ => _ = OnDebouncedFileChange(),
-                    null,
-                    DebounceMs,
-                    Timeout.Infinite);
+                System.Threading.Timer? oldTimer;
+                lock (_timerLock)
+                {
+                    oldTimer = _debounceTimer;
+                    _debounceTimer = new System.Threading.Timer(
+                        _ => _ = OnDebouncedFileChange(),
+                        null,
+                        DebounceMs,
+                        Timeout.Infinite);
+                }
+                oldTimer?.Dispose();
             }
         }
     }
