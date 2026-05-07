@@ -23,6 +23,16 @@ interface LinesResponsePayload {
   startLine: number;
   lines: string[];
   totalLines: number;
+  lineLengths?: number[];
+}
+
+/** Payload from a LineChunkResponse message. */
+interface LineChunkPayload {
+  lineNumber: number;
+  startColumn: number;
+  text: string;
+  totalLineChars: number;
+  hasMore: boolean;
 }
 
 /** Error information sent from the backend. */
@@ -50,8 +60,10 @@ interface MessageEnvelope {
 const MessageTypes = {
   OpenFileRequest: 'OpenFileRequest',
   RequestLinesMessage: 'RequestLinesMessage',
+  RequestLineChunk: 'RequestLineChunk',
   FileOpenedResponse: 'FileOpenedResponse',
   LinesResponse: 'LinesResponse',
+  LineChunkResponse: 'LineChunkResponse',
   ErrorResponse: 'ErrorResponse',
   FileLoadProgressMessage: 'FileLoadProgressMessage',
 } as const;
@@ -63,8 +75,10 @@ const MessageTypes = {
 interface InteropService {
   sendOpenFileRequest(): void;
   sendRequestLines(startLine: number, lineCount: number): void;
+  sendRequestLineChunk(lineNumber: number, startColumn: number, columnCount: number): void;
   onFileOpened(callback: (data: FileMeta) => void): void;
   onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
+  onLineChunkResponse(callback: (data: LineChunkPayload) => void): void;
   onFileLoadProgress(callback: (data: FileLoadProgressPayload) => void): void;
   onError(callback: (error: ErrorInfo) => void): void;
   dispose(): void;
@@ -80,6 +94,7 @@ interface InteropService {
 function createInteropService(): InteropService {
   const fileOpenedCallbacks: Array<(data: FileMeta) => void> = [];
   const linesResponseCallbacks: Array<(data: LinesResponsePayload) => void> = [];
+  const lineChunkResponseCallbacks: Array<(data: LineChunkPayload) => void> = [];
   const fileLoadProgressCallbacks: Array<(data: FileLoadProgressPayload) => void> = [];
   const errorCallbacks: Array<(error: ErrorInfo) => void> = [];
 
@@ -111,6 +126,12 @@ function createInteropService(): InteropService {
       case MessageTypes.LinesResponse:
         for (const cb of linesResponseCallbacks) {
           cb(envelope.payload as LinesResponsePayload);
+        }
+        break;
+
+      case MessageTypes.LineChunkResponse:
+        for (const cb of lineChunkResponseCallbacks) {
+          cb(envelope.payload as LineChunkPayload);
         }
         break;
 
@@ -213,12 +234,36 @@ function createInteropService(): InteropService {
       }
     },
 
+    sendRequestLineChunk(lineNumber: number, startColumn: number, columnCount: number): void {
+      const envelope: MessageEnvelope = {
+        type: MessageTypes.RequestLineChunk,
+        payload: { lineNumber, startColumn, columnCount },
+        timestamp: new Date().toISOString(),
+      };
+
+      try {
+        (window as any).external.sendMessage(JSON.stringify(envelope));
+      } catch {
+        const interopError: ErrorInfo = {
+          errorCode: 'INTEROP_FAILURE',
+          message: 'The application is not responding. Please restart.',
+        };
+        for (const cb of errorCallbacks) {
+          cb(interopError);
+        }
+      }
+    },
+
     onFileOpened(callback: (data: FileMeta) => void): void {
       fileOpenedCallbacks.push(callback);
     },
 
     onLinesResponse(callback: (data: LinesResponsePayload) => void): void {
       linesResponseCallbacks.push(callback);
+    },
+
+    onLineChunkResponse(callback: (data: LineChunkPayload) => void): void {
+      lineChunkResponseCallbacks.push(callback);
     },
 
     onError(callback: (error: ErrorInfo) => void): void {
@@ -234,6 +279,7 @@ function createInteropService(): InteropService {
       window.removeEventListener('message', handleDomMessage);
       fileOpenedCallbacks.length = 0;
       linesResponseCallbacks.length = 0;
+      lineChunkResponseCallbacks.length = 0;
       fileLoadProgressCallbacks.length = 0;
       errorCallbacks.length = 0;
     },

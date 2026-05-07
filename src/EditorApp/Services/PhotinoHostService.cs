@@ -172,6 +172,7 @@ public class PhotinoHostService
     {
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
         _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
+        _messageRouter.RegisterHandler<RequestLineChunk>(HandleRequestLineChunkAsync);
 
         // Subscribe to stale file detection — route through debounced refresh.
         // Store delegate reference so Shutdown can unsubscribe (Fix 9.3).
@@ -249,9 +250,12 @@ public class PhotinoHostService
             });
 
             // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early.
-            // Path is NOT set here — only on success after scan completes (Fix 9.5).
+            // Set path early so HandleRequestLinesAsync can serve lines during scan.
+            // The line index cache is populated before this callback fires, so reads work.
+            // If scan later fails, catch blocks will clear _currentFilePath.
             Action<FileOpenMetadata> onPartialMetadata = (partialMeta) =>
             {
+                _currentFilePath = filePath;
                 _ = _messageRouter.SendToUIAsync(new FileOpenedResponse
                 {
                     FileName = partialMeta.FileName,
@@ -290,10 +294,12 @@ public class PhotinoHostService
         catch (OperationCanceledException)
         {
             // Scan was cancelled due to a new file being opened — log and do not send error to UI (Requirement 9.3)
+            _currentFilePath = null;
             Console.Error.WriteLine("[INFO] File scan cancelled due to new file open request.");
         }
         catch (FileNotFoundException ex)
         {
+            _currentFilePath = null;
             Console.Error.WriteLine($"[ERROR] File not found: {ex.FileName}\n{ex}");
             await _messageRouter.SendToUIAsync(new ErrorResponse
             {
@@ -304,6 +310,7 @@ public class PhotinoHostService
         }
         catch (UnauthorizedAccessException ex)
         {
+            _currentFilePath = null;
             Console.Error.WriteLine($"[ERROR] Permission denied\n{ex}");
             await _messageRouter.SendToUIAsync(new ErrorResponse
             {
@@ -313,6 +320,7 @@ public class PhotinoHostService
         }
         catch (System.Text.Json.JsonException ex)
         {
+            _currentFilePath = null;
             Console.Error.WriteLine($"[ERROR] JSON serialization failure\n{ex}");
             await _messageRouter.SendToUIAsync(new ErrorResponse
             {
@@ -323,6 +331,7 @@ public class PhotinoHostService
         }
         catch (Exception ex)
         {
+            _currentFilePath = null;
             Console.Error.WriteLine($"[ERROR] Unexpected error\n{ex}");
             await _messageRouter.SendToUIAsync(new ErrorResponse
             {
@@ -357,7 +366,8 @@ public class PhotinoHostService
             {
                 StartLine = result.StartLine,
                 Lines = result.Lines,
-                TotalLines = result.TotalLines
+                TotalLines = result.TotalLines,
+                LineLengths = result.LineLengths
             });
         }
         catch (FileNotFoundException ex)
@@ -377,6 +387,68 @@ public class PhotinoHostService
             {
                 ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
                 Message = "An unexpected error occurred while reading the file.",
+                Details = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Handle a <see cref="RequestLineChunk"/> from the React frontend:
+    /// read the requested chunk of a large line and send it back.
+    /// </summary>
+    private async Task HandleRequestLineChunkAsync(RequestLineChunk request)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_currentFilePath))
+            {
+                await _messageRouter.SendToUIAsync(new ErrorResponse
+                {
+                    ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                    Message = "No file is currently open."
+                });
+                return;
+            }
+
+            var result = await _fileService.ReadLineChunkAsync(
+                _currentFilePath, request.LineNumber, request.StartColumn, request.ColumnCount);
+
+            await _messageRouter.SendToUIAsync(new LineChunkResponse
+            {
+                LineNumber = result.LineNumber,
+                StartColumn = result.StartColumn,
+                Text = result.Text,
+                TotalLineChars = result.TotalLineChars,
+                HasMore = result.HasMore
+            });
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Invalid line number in chunk request: {ex}\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                Message = "Invalid line number specified.",
+                Details = ex.Message
+            });
+        }
+        catch (FileNotFoundException ex)
+        {
+            Console.Error.WriteLine($"[ERROR] File not found during chunk read: {ex.FileName}\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.FILE_NOT_FOUND.ToString(),
+                Message = "The file could not be found. It may have been moved or deleted.",
+                Details = ex.FileName
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Error reading line chunk\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                Message = "An unexpected error occurred while reading the line chunk.",
                 Details = ex.Message
             });
         }

@@ -110,5 +110,13 @@ public class ErrorHaltsProgressPropertyTests
             => OpenFileAsync(filePath, onPartialMetadata: null, progress, cancellationToken);
 
         public void CloseFile(string filePath) { }
+
+        public int GetLineCharLength(string filePath, int lineNumber) => 80;
+
+        public Task<LineChunkResult> ReadLineChunkAsync(string filePath, int lineNumber, int startColumn, int columnCount, CancellationToken cancellationToken = default)
+            => Task.FromResult(new LineChunkResult(lineNumber, startColumn, "chunk", 80, false));
+
+        public Task<List<int>> SearchInLargeLineAsync(string filePath, int lineNumber, string searchTerm, CancellationToken cancellationToken = default)
+            => Task.FromResult(new List<int>());
     }
 }
