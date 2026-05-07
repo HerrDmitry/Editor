@@ -141,7 +141,7 @@ declare namespace JSX {
     h2: React.HTMLAttributes<HTMLHeadingElement>;
     h3: React.HTMLAttributes<HTMLHeadingElement>;
     a: React.HTMLAttributes<HTMLAnchorElement> & { href?: string; target?: string };
-    input: React.HTMLAttributes<HTMLInputElement> & { type?: string; value?: string; placeholder?: string; checked?: boolean; disabled?: boolean };
+    input: React.HTMLAttributes<HTMLInputElement> & { type?: string; value?: string; placeholder?: string; checked?: boolean; disabled?: boolean; min?: number | string; max?: number | string; step?: number | string };
     label: React.HTMLAttributes<HTMLLabelElement> & { htmlFor?: string };
     ul: React.HTMLAttributes<HTMLUListElement>;
     li: React.HTMLAttributes<HTMLLIElement>;

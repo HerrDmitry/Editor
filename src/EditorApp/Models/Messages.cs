@@ -73,6 +73,14 @@ public class LinesResponse : IMessage
 
     [JsonPropertyName("totalLines")]
     public int TotalLines { get; set; }
+
+    /// <summary>
+    /// Character length of each line. For normal lines, equals Lines[i].Length.
+    /// For large lines, indicates total line length (Lines[i] is truncated to first chunk).
+    /// Null when all lines are normal (backward compat).
+    /// </summary>
+    [JsonPropertyName("lineLengths")]
+    public int[]? LineLengths { get; set; }
 }
 
 /// <summary>
@@ -103,4 +111,40 @@ public class FileLoadProgressMessage : IMessage
 
     [JsonPropertyName("fileSizeBytes")]
     public long FileSizeBytes { get; set; }
+}
+
+/// <summary>
+/// Request from frontend for a chunk of a large line.
+/// </summary>
+public class RequestLineChunk : IMessage
+{
+    [JsonPropertyName("lineNumber")]
+    public int LineNumber { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("columnCount")]
+    public int ColumnCount { get; set; }
+}
+
+/// <summary>
+/// Response with a chunk of line content.
+/// </summary>
+public class LineChunkResponse : IMessage
+{
+    [JsonPropertyName("lineNumber")]
+    public int LineNumber { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = string.Empty;
+
+    [JsonPropertyName("totalLineChars")]
+    public int TotalLineChars { get; set; }
+
+    [JsonPropertyName("hasMore")]
+    public bool HasMore { get; set; }
 }

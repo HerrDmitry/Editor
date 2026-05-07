@@ -32,6 +32,16 @@ public class FileService : IFileService
     private const int ProgressThrottleMs = 50;
 
     /// <summary>
+    /// Characters per chunk. Lines below this length are "normal" and sent in full.
+    /// </summary>
+    public const int ChunkSizeChars = 65_536;
+
+    /// <summary>
+    /// Max JSON message payload bytes (safety limit for Photino bridge messages).
+    /// </summary>
+    public const int MaxMessagePayloadBytes = 4_000_000;
+
+    /// <summary>
     /// Tracks the last time OnStaleFileDetected was fired per file path,
     /// to avoid flooding the event on every ReadLinesAsync call.
     /// </summary>
@@ -48,6 +58,12 @@ public class FileService : IFileService
     /// Uses ConcurrentDictionary for thread-safe access without manual locking.
     /// </summary>
     private readonly ConcurrentDictionary<string, CacheEntry> _lineIndexCache = new();
+
+    /// <summary>
+    /// Cache of character lengths for lines containing multibyte characters.
+    /// Key = (filePath, lineNumber). Only populated when byte_length != char_length.
+    /// </summary>
+    private readonly ConcurrentDictionary<(string, int), int> _charLengthCache = new();
 
     /// <inheritdoc />
     public Task<FileOpenResult> OpenFileDialogAsync()
@@ -302,20 +318,193 @@ public class FileService : IFileService
         // Use cached encoding from CacheEntry instead of re-detecting
         var encoding = cacheEntry.Encoding;
         var lines = new string[lineCount];
+        var lineLengths = new int[lineCount];
+        bool hasLargeLines = false;
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        stream.Seek(startOffset, SeekOrigin.Begin);
-        using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
-
+        // First pass: check if any line in range is large
+        // If so, we cannot use sequential StreamReader (it would read entire large lines).
+        // Instead, read each line individually via seeking.
+        bool anyLargeLine = false;
         for (int i = 0; i < lineCount; i++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            lines[i] = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+            int currentLine = startLine + i;
+            long lineByteLen = GetLineByteLength(index, currentLine, cacheEntry.FileSize);
+            if (lineByteLen > ChunkSizeChars * 2)
+            {
+                anyLargeLine = true;
+                break;
+            }
         }
 
-        return new LinesResult(startLine, lines, snapshotCount);
+        if (anyLargeLine)
+        {
+            // Mixed mode: read each line individually (seek-based)
+            for (int i = 0; i < lineCount; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int currentLine = startLine + i;
+                long lineByteLen = GetLineByteLength(index, currentLine, cacheEntry.FileSize);
+
+                if (lineByteLen > ChunkSizeChars * 2)
+                {
+                    // Large line — read only first chunk via seek
+                    var chunk = await ReadLineChunkAsync(filePath, currentLine, 0, ChunkSizeChars, cancellationToken);
+                    lines[i] = chunk.Text;
+                    lineLengths[i] = chunk.TotalLineChars;
+                    hasLargeLines = true;
+                }
+                else
+                {
+                    // Normal line — seek to its offset and read via StreamReader
+                    long lineOffset = index.GetOffset(currentLine);
+                    await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    stream.Seek(lineOffset, SeekOrigin.Begin);
+                    using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
+                    var lineText = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+                    lines[i] = lineText;
+                    lineLengths[i] = lineText.Length;
+                }
+            }
+        }
+        else
+        {
+            // Fast path: all lines normal — use sequential StreamReader
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            stream.Seek(startOffset, SeekOrigin.Begin);
+            using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false);
+
+            for (int i = 0; i < lineCount; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var lineText = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+                lines[i] = lineText;
+                lineLengths[i] = lineText.Length;
+            }
+        }
+
+        // Set lineLengths to null when all lines are normal (backward compat)
+        int[]? resultLineLengths = hasLargeLines ? lineLengths : null;
+
+        return new LinesResult(startLine, lines, snapshotCount, resultLineLengths);
+    }
+
+    /// <inheritdoc />
+    public async Task<List<int>> SearchInLargeLineAsync(
+        string filePath, int lineNumber, string searchTerm,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(searchTerm))
+            return new List<int>();
+
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
+
+        var index = cacheEntry.Index;
+        if (lineNumber < 0 || lineNumber >= index.LineCount)
+            throw new ArgumentOutOfRangeException(nameof(lineNumber), lineNumber,
+                $"Line number must be in [0, {index.LineCount}).");
+
+        var lineStartByte = index.GetOffset(lineNumber);
+        long lineByteLen = GetLineByteLength(index, lineNumber, cacheEntry.FileSize);
+        var encoding = cacheEntry.Encoding;
+        var matches = new List<int>();
+
+        // For non-large lines, read the full line and do simple search
+        if (lineByteLen <= ChunkSizeChars * 2)
+        {
+            await using var stream = new FileStream(filePath, FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite, bufferSize: 65536);
+            stream.Seek(lineStartByte, SeekOrigin.Begin);
+            using var reader = new StreamReader(stream, encoding,
+                detectEncodingFromByteOrderMarks: false, bufferSize: 65536);
+
+            var lineText = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+            int idx = 0;
+            while (idx <= lineText.Length - searchTerm.Length)
+            {
+                int found = lineText.IndexOf(searchTerm, idx, StringComparison.Ordinal);
+                if (found < 0) break;
+                matches.Add(found);
+                idx = found + 1;
+            }
+            return matches;
+        }
+
+        // Large line: read in chunks with overlap to catch boundary matches
+        int overlap = searchTerm.Length - 1;
+        int chunkSize = ChunkSizeChars;
+        var chunkBuffer = new char[chunkSize + overlap];
+        int chunkStartCol = 0;
+        int carryOver = 0; // chars carried from previous chunk (overlap region)
+
+        await using var fs = new FileStream(filePath, FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite, bufferSize: 65536);
+        fs.Seek(lineStartByte, SeekOrigin.Begin);
+        using var sr = new StreamReader(fs, encoding,
+            detectEncodingFromByteOrderMarks: false, bufferSize: 65536);
+
+        bool endOfLine = false;
+        while (!endOfLine)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Read chars into buffer after the carry-over region
+            int toRead = chunkSize;
+            int totalRead = carryOver;
+            while (totalRead < carryOver + toRead)
+            {
+                int read = await sr.ReadAsync(chunkBuffer.AsMemory(totalRead, carryOver + toRead - totalRead), cancellationToken);
+                if (read == 0)
+                {
+                    endOfLine = true;
+                    break;
+                }
+                totalRead += read;
+            }
+
+            // Check for newline — trim at end of line
+            int usableLength = totalRead;
+            for (int i = carryOver; i < totalRead; i++)
+            {
+                if (chunkBuffer[i] == '\r' || chunkBuffer[i] == '\n')
+                {
+                    usableLength = i;
+                    endOfLine = true;
+                    break;
+                }
+            }
+
+            // Search within the usable portion of the buffer
+            var searchSpan = new ReadOnlySpan<char>(chunkBuffer, 0, usableLength);
+            int searchStart = 0;
+            while (searchStart <= usableLength - searchTerm.Length)
+            {
+                int found = searchSpan.Slice(searchStart).IndexOf(searchTerm.AsSpan(), StringComparison.Ordinal);
+                if (found < 0) break;
+
+                int absoluteCol = chunkStartCol + searchStart + found;
+                // Avoid duplicates from overlap: only add if match starts at or after chunkStartCol + carryOver
+                // (matches in the overlap region were already found in previous chunk, except on first chunk)
+                if (carryOver == 0 || (searchStart + found) >= carryOver)
+                {
+                    matches.Add(absoluteCol);
+                }
+                searchStart += found + 1;
+            }
+
+            if (!endOfLine)
+            {
+                // Prepare carry-over: copy last 'overlap' chars to start of buffer
+                int newChunkStartCol = chunkStartCol + usableLength - overlap;
+                Array.Copy(chunkBuffer, usableLength - overlap, chunkBuffer, 0, overlap);
+                carryOver = overlap;
+                chunkStartCol = newChunkStartCol;
+            }
+        }
+
+        return matches;
     }
 
     /// <inheritdoc />
@@ -326,6 +515,134 @@ public class FileService : IFileService
         {
             cacheEntry.Index.Dispose();
         }
+    }
+
+    /// <inheritdoc />
+    public int GetLineCharLength(string filePath, int lineNumber)
+    {
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
+
+        var index = cacheEntry.Index;
+        if (lineNumber < 0 || lineNumber >= index.LineCount)
+            throw new ArgumentOutOfRangeException(nameof(lineNumber), lineNumber,
+                $"Line number must be in [0, {index.LineCount}).");
+
+        // Check multibyte cache first
+        if (_charLengthCache.TryGetValue((filePath, lineNumber), out var cached))
+            return cached;
+
+        // Derive byte length from consecutive offsets
+        long lineStartByte = index.GetOffset(lineNumber);
+        long lineEndByte = (lineNumber + 1 < index.LineCount)
+            ? index.GetOffset(lineNumber + 1)
+            : cacheEntry.FileSize;
+
+        long byteLength = lineEndByte - lineStartByte;
+
+        var encoding = cacheEntry.Encoding;
+
+        // For single-byte encodings: byte_length == char_length (minus newline)
+        if (encoding.IsSingleByte)
+        {
+            // Subtract conservatively 2 for CRLF newline bytes
+            return (int)Math.Max(0, byteLength - 2);
+        }
+
+        // For UTF-8: optimistic ASCII assumption (byte == char)
+        if (encoding is UTF8Encoding)
+        {
+            // Subtract conservatively 2 for CRLF newline bytes
+            return (int)Math.Max(0, byteLength - 2);
+        }
+
+        // For fixed-width multi-byte (UTF-16, UTF-32): divide by bytes-per-char
+        int bytesPerChar = encoding.GetMaxByteCount(1);
+        return (int)Math.Max(0, byteLength / bytesPerChar - 1); // -1 for newline char
+    }
+
+    /// <inheritdoc />
+    public async Task<LineChunkResult> ReadLineChunkAsync(
+        string filePath, int lineNumber, int startColumn, int columnCount,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
+
+        var index = cacheEntry.Index;
+        if (lineNumber < 0 || lineNumber >= index.LineCount)
+            throw new ArgumentOutOfRangeException(nameof(lineNumber), lineNumber,
+                $"Line number must be in [0, {index.LineCount}).");
+
+        var lineStartByte = index.GetOffset(lineNumber);
+        var encoding = cacheEntry.Encoding;
+
+        await using var stream = new FileStream(filePath, FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite, bufferSize: 65536);
+        stream.Seek(lineStartByte, SeekOrigin.Begin);
+
+        using var reader = new StreamReader(stream, encoding,
+            detectEncodingFromByteOrderMarks: false, bufferSize: 65536);
+
+        // Skip startColumn characters using 8192-char buffers
+        var skipBuffer = new char[Math.Min(8192, Math.Max(startColumn, 1))];
+        int skipped = 0;
+        while (skipped < startColumn)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var toRead = Math.Min(skipBuffer.Length, startColumn - skipped);
+            var read = await reader.ReadAsync(skipBuffer.AsMemory(0, toRead), cancellationToken);
+            if (read == 0) break; // End of stream reached before startColumn
+            // Check if we hit a newline during skip (end of line)
+            for (int i = 0; i < read; i++)
+            {
+                if (skipBuffer[i] == '\r' || skipBuffer[i] == '\n')
+                {
+                    // Line ended before startColumn — return empty
+                    var totalCharsEarly = GetLineCharLength(filePath, lineNumber);
+                    return new LineChunkResult(lineNumber, startColumn, string.Empty, totalCharsEarly, false);
+                }
+            }
+            skipped += read;
+        }
+
+        // Read the requested chunk (capped at ChunkSizeChars)
+        var chunkSize = Math.Min(columnCount, ChunkSizeChars);
+        var chunkBuffer = new char[chunkSize];
+        int totalRead = 0;
+        while (totalRead < chunkBuffer.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await reader.ReadAsync(chunkBuffer.AsMemory(totalRead, chunkBuffer.Length - totalRead), cancellationToken);
+            if (read == 0) break;
+            totalRead += read;
+        }
+
+        // Trim at newline if end-of-line reached
+        var text = new string(chunkBuffer, 0, totalRead);
+        var newlineIdx = text.IndexOfAny(['\r', '\n']);
+        if (newlineIdx >= 0)
+            text = text[..newlineIdx];
+
+        var totalLineChars = GetLineCharLength(filePath, lineNumber);
+        var hasMore = (startColumn + text.Length) < totalLineChars;
+
+        return new LineChunkResult(lineNumber, startColumn, text, totalLineChars, hasMore);
+    }
+
+    /// <summary>
+    /// Computes the byte length of a line (including line-ending bytes) from
+    /// CompressedLineIndex offsets. For the last line, uses fileSize as the
+    /// upper bound instead of a next-line offset.
+    /// </summary>
+    private static long GetLineByteLength(CompressedLineIndex index, int lineNumber, long fileSize)
+    {
+        long lineStart = index.GetOffset(lineNumber);
+        if (lineNumber < index.LineCount - 1)
+        {
+            return index.GetOffset(lineNumber + 1) - lineStart;
+        }
+        return fileSize - lineStart;
     }
 
     /// <summary>
