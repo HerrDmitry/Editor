@@ -88,6 +88,13 @@ public class PhotinoHostService
     private volatile bool _pendingRefresh;
 
     /// <summary>
+    /// Stores the last viewport request parameters for replay after scan completion.
+    /// Written in HandleRequestViewportAsync, read in OpenFileByPathAsync after large-file scan.
+    /// Marked volatile for cross-thread visibility.
+    /// </summary>
+    private volatile RequestViewport? _lastViewportRequest;
+
+    /// <summary>
     /// Stored delegate for OnStaleFileDetected subscription so we can unsubscribe in Shutdown.
     /// (Fix 9.3: Event unsubscription)
     /// </summary>
@@ -253,12 +260,17 @@ public class PhotinoHostService
                 });
             });
 
+            // Track whether partial metadata was emitted (large file path).
+            // Used to decide whether to push viewport after scan completion.
+            bool partialWasEmitted = false;
+
             // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early.
             // Set path early so HandleRequestLinesAsync can serve lines during scan.
             // The line index cache is populated before this callback fires, so reads work.
             // If scan later fails, catch blocks will clear _currentFilePath.
             Action<FileOpenMetadata> onPartialMetadata = (partialMeta) =>
             {
+                partialWasEmitted = true;
                 _currentFilePath = filePath;
                 _ = _messageRouter.SendToUIAsync(new FileOpenedResponse
                 {
@@ -296,6 +308,48 @@ public class PhotinoHostService
                 IsPartial = false,
                 MaxLineLength = metadata.MaxLineLength
             });
+
+            // Push viewport content after scan completion for large files.
+            // Small files (no partialWasEmitted) skip this entirely.
+            if (partialWasEmitted && _viewportService is not null)
+            {
+                if (!scanToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var vp = _lastViewportRequest;
+                        var startLine = vp?.StartLine ?? 0;
+                        var lineCount = vp?.LineCount ?? 100;
+                        var startColumn = vp?.StartColumn ?? 0;
+                        var columnCount = vp?.ColumnCount ?? 200;
+                        var wrapMode = vp?.WrapMode ?? false;
+                        var viewportColumns = vp?.ViewportColumns ?? 200;
+
+                        var result = await _viewportService.GetViewportAsync(
+                            filePath, startLine, lineCount, startColumn, columnCount, wrapMode, viewportColumns, scanToken);
+
+                        await _messageRouter.SendToUIAsync(new ViewportResponse
+                        {
+                            Lines = result.Lines,
+                            StartLine = result.StartLine,
+                            StartColumn = result.StartColumn,
+                            TotalPhysicalLines = result.TotalPhysicalLines,
+                            LineLengths = result.LineLengths,
+                            MaxLineLength = result.MaxLineLength,
+                            TotalVirtualLines = result.TotalVirtualLines,
+                            Truncated = result.Truncated
+                        });
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Scan was cancelled, skip viewport push
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"[WARN] Failed to push viewport after scan complete: {ex.Message}");
+                    }
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -466,6 +520,8 @@ public class PhotinoHostService
     /// </summary>
     private async Task HandleRequestViewportAsync(RequestViewport request)
     {
+        _lastViewportRequest = request;
+
         try
         {
             if (string.IsNullOrEmpty(_currentFilePath))
