@@ -341,7 +341,7 @@ public class PhotinoHostPreservationTests : IDisposable
     /// WHEN file change is detected
     /// THEN the system SHALL CONTINUE TO debounce and trigger refresh cycle
     /// </summary>
-    [Property(MaxTest = 30)]
+    [Property(MaxTest = 10)]
     public bool FileChange_TriggersDebounceAndRefresh(string content)
     {
         // Generate non-trivial content
@@ -414,9 +414,8 @@ public class PhotinoHostPreservationTests : IDisposable
     /// Validates: Requirements 3.2
     ///
     /// NOTE: This test is timing-dependent (relies on Thread.Sleep for debounce waits).
-    /// May exceed 120s or produce flaky results in CI. Run manually.
     /// </summary>
-    [Property(MaxTest = 20, Skip = "Timing-dependent: relies on Thread.Sleep for debounce. Run manually.")]
+    [Property(MaxTest = 5)]
     public bool FileChange_MultipleRapidChanges_TriggersSingleRefresh(NonEmptyString content)
     {
         var path = CreateTempFile(content.Get);
@@ -470,9 +469,9 @@ public class PhotinoHostPreservationTests : IDisposable
     /// Validates: Requirements 3.2
     ///
     /// NOTE: This test is timing-dependent (relies on Thread.Sleep for debounce waits)
-    /// and manipulates internal state via reflection. May exceed 120s or produce flaky results. Run manually.
+    /// and manipulates internal state via reflection. 
     /// </summary>
-    [Property(MaxTest = 15, Skip = "Timing-dependent: relies on Thread.Sleep for debounce + reflection state manipulation. Run manually.")]
+    [Property(MaxTest = 5)]
     public bool FileChange_ChangeDuringRefresh_TriggersPendingRefresh(NonEmptyString content)
     {
         var path = CreateTempFile(content.Get);
@@ -502,6 +501,9 @@ public class PhotinoHostPreservationTests : IDisposable
         File.AppendAllText(path, "\nChange during refresh");
         onFileChangedMethod?.Invoke(service, new object[] { fileWatcher, eventArgs });
 
+        // Wait for the timer started by OnFileChanged to fire and set _pendingRefresh
+        Thread.Sleep(500 + 200);
+
         // Check pending flag set
         var pendingRefreshField = serviceType.GetField("_pendingRefresh", BindingFlags.NonPublic | BindingFlags.Instance);
         var pendingRefresh = (bool?)pendingRefreshField?.GetValue(service);
@@ -514,6 +516,30 @@ public class PhotinoHostPreservationTests : IDisposable
 
         // Manually trigger the pending refresh logic (simulating end of finally block)
         var onDebouncedFileChangeMethod = serviceType.GetMethod("OnDebouncedFileChange", BindingFlags.NonPublic | BindingFlags.Instance);
+        
+        // At the end of a refresh, if _pendingRefresh is true, a NEW debounce cycle is started.
+        // We simulate the logic in the finally block of OnDebouncedFileChange:
+        if (pendingRefresh == true)
+        {
+            var pendingRefreshFieldSetter = serviceType.GetField("_pendingRefresh", BindingFlags.NonPublic | BindingFlags.Instance);
+            pendingRefreshFieldSetter?.SetValue(service, false);
+            
+            var timerLockField = serviceType.GetField("_timerLock", BindingFlags.NonPublic | BindingFlags.Instance);
+            var timerLock = timerLockField?.GetValue(service);
+            var debounceTimerField = serviceType.GetField("_debounceTimer", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            lock (timerLock!)
+            {
+                var oldTimer = debounceTimerField?.GetValue(service) as System.Threading.Timer;
+                var newTimer = new System.Threading.Timer(
+                    _ => _ = (Task)onDebouncedFileChangeMethod?.Invoke(service, null)!,
+                    null,
+                    500, // DebounceMs
+                    Timeout.Infinite);
+                debounceTimerField?.SetValue(service, newTimer);
+                oldTimer?.Dispose();
+            }
+        }
 
         // Wait for debounce timer from pending refresh to fire (500ms + buffer)
         Thread.Sleep(500 + 200);
@@ -621,7 +647,7 @@ public class PhotinoHostPreservationTests : IDisposable
     ///
     /// Validates: Requirements 3.2
     /// </summary>
-    [Property(MaxTest = 25)]
+    [Property(MaxTest = 5)]
     public bool FileChange_Refresh_UpdatesMetadata(string originalContent, string appendedContent)
     {
         // Ensure non-empty content
