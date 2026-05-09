@@ -202,6 +202,10 @@ public class CancellationUnitTests
 
         public void CloseFile(string filePath) { }
 
+        public int GetTotalLines(string filePath) => 10;
+
+        public int GetMaxLineLength(string filePath) => 80;
+
         public int GetLineCharLength(string filePath, int lineNumber) => 80;
 
         public Task<LineChunkResult> ReadLineChunkAsync(string filePath, int lineNumber, int startColumn, int columnCount, CancellationToken cancellationToken = default)

@@ -28,10 +28,11 @@ public class Program
         // Create core services
         var fileService = new FileService();
         var messageRouter = new MessageRouter(messagingAdapter);
+        var viewportService = new ViewportService(fileService);
 
         // Create the host service — this configures the window (1200×800,
         // centered, resizable, title "Editor") and registers message handlers.
-        var hostService = new PhotinoHostService(app, messageRouter, fileService);
+        var hostService = new PhotinoHostService(app, messageRouter, fileService, viewportService);
 
         // Initialize keyboard shortcut handler.
         var shortcutHandler = new KeyboardShortcutHandler(messageRouter);
