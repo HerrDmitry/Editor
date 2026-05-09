@@ -202,7 +202,8 @@ function createInteropService(): InteropService {
 
       try {
         (window as any).external.sendMessage(JSON.stringify(envelope));
-        startTimeout();
+        // No timeout for file dialog — it blocks until user selects/cancels
+        // and can take arbitrarily long.
       } catch {
         const interopError: ErrorInfo = {
           errorCode: 'INTEROP_FAILURE',

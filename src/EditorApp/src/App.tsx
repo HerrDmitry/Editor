@@ -123,6 +123,11 @@ function App() {
 
       if (data.isPartial) {
         // Partial metadata — show content immediately
+        // Reset buffer if this is a different file
+        if (!fileMetaRef.current || fileMetaRef.current.fileName !== data.fileName) {
+          setLines(null);
+          setLinesStartLine(0);
+        }
         setFileMeta(data);
         setIsLoading(false);
         setError(null);
@@ -154,6 +159,8 @@ function App() {
           setIsLoading(false);
           setError(null);
           setLoadProgress(null);
+          setLines(null);
+          setLinesStartLine(0);
           setTitleBarText(`${data.fileName} - Editor`);
           lastRequestedStartRef.current = 0;
           interop.sendRequestLines(0, 200);
@@ -224,7 +231,6 @@ function App() {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
         e.preventDefault();
-        setIsLoading(true);
         setError(null);
         interop.sendOpenFileRequest();
       }
