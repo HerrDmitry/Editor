@@ -77,6 +77,17 @@ public interface IFileService
     Task<List<int>> SearchInLargeLineAsync(string filePath, int lineNumber, string searchTerm, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Get the total number of physical lines in a previously opened file.
+    /// </summary>
+    int GetTotalLines(string filePath);
+
+    /// <summary>
+    /// Get the maximum character length across all lines in a previously opened file.
+    /// Computed during file scan and stored in cache metadata.
+    /// </summary>
+    int GetMaxLineLength(string filePath);
+
+    /// <summary>
     /// Remove a file from the line index cache and dispose its resources.
     /// No-op if the file is not in the cache.
     /// </summary>

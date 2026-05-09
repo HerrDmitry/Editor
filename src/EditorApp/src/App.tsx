@@ -123,6 +123,11 @@ function App() {
 
       if (data.isPartial) {
         // Partial metadata — show content immediately
+        // Reset buffer if this is a different file
+        if (!fileMetaRef.current || fileMetaRef.current.fileName !== data.fileName) {
+          setLines(null);
+          setLinesStartLine(0);
+        }
         setFileMeta(data);
         setIsLoading(false);
         setError(null);
@@ -134,15 +139,28 @@ function App() {
       } else {
         // Final metadata
         if (fileMetaRef.current && fileMetaRef.current.fileName === data.fileName) {
-          // Same file — update totalLines only, preserve scroll/buffer
+          // Same file scan complete — update metadata and re-request current buffer
+          // so displayed content reflects the fully-indexed file.
+          const currentStart = linesStartRef.current;
+          const currentCount = linesRef.current ? linesRef.current.length : 0;
           setFileMeta(data);
           setLoadProgress(null);
+
+          // Re-request current buffer range to refresh content
+          const bufferLen = Math.max(currentCount, APP_FETCH_SIZE);
+          const newStart = Math.min(currentStart, Math.max(0, data.totalLines - bufferLen));
+          const count = Math.min(bufferLen, data.totalLines - newStart);
+          lastRequestedStartRef.current = newStart;
+          isJumpRequestRef.current = true;
+          interop.sendRequestLines(newStart, count);
         } else {
           // Different file (small file or first open) — full reset
           setFileMeta(data);
           setIsLoading(false);
           setError(null);
           setLoadProgress(null);
+          setLines(null);
+          setLinesStartLine(0);
           setTitleBarText(`${data.fileName} - Editor`);
           lastRequestedStartRef.current = 0;
           interop.sendRequestLines(0, 200);
@@ -213,7 +231,6 @@ function App() {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
         e.preventDefault();
-        setIsLoading(true);
         setError(null);
         interop.sendOpenFileRequest();
       }

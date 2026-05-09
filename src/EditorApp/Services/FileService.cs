@@ -7,7 +7,7 @@ namespace EditorApp.Services;
 /// <summary>
 /// Stores cached metadata for an opened file alongside its line index.
 /// </summary>
-internal record CacheEntry(CompressedLineIndex Index, Encoding Encoding, long FileSize, DateTime LastWriteTimeUtc);
+internal record CacheEntry(CompressedLineIndex Index, Encoding Encoding, long FileSize, DateTime LastWriteTimeUtc, int MaxLineLength);
 
 /// <summary>
 /// Handles all file system operations using streamed reading with a line offset index.
@@ -126,6 +126,8 @@ public class FileService : IFileService
         long totalBytesRead = 0;
         bool partialEmitted = false;
         var lastReportTime = Environment.TickCount64;
+        long prevLineOffset = stream.Position;
+        int maxLineLength = 0;
 
         while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
         {
@@ -141,6 +143,9 @@ public class FileService : IFileService
                 {
                     // \n or the \n part of \r\n — new line starts after this byte
                     long nextLineOffset = stream.Position - bytesRead + i + 1;
+                    int lineByteLen = (int)(nextLineOffset - prevLineOffset);
+                    if (lineByteLen > maxLineLength) maxLineLength = lineByteLen;
+                    prevLineOffset = nextLineOffset;
                     index.AddOffset(nextLineOffset);
                     prevWasCR = false;
                 }
@@ -148,6 +153,9 @@ public class FileService : IFileService
                 {
                     // Previous byte was \r but this byte is not \n — standalone \r line ending
                     long nextLineOffset = stream.Position - bytesRead + i;
+                    int lineByteLen = (int)(nextLineOffset - prevLineOffset);
+                    if (lineByteLen > maxLineLength) maxLineLength = lineByteLen;
+                    prevLineOffset = nextLineOffset;
                     index.AddOffset(nextLineOffset);
                     prevWasCR = (b == (byte)'\r');
                 }
@@ -162,7 +170,7 @@ public class FileService : IFileService
             {
                 index.EnableConcurrentAccess();
 
-                _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc);
+                _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc, maxLineLength);
 
                 var partialEncodingName = GetEncodingDisplayName(encoding);
                 onPartialMetadata?.Invoke(new FileOpenMetadata(
@@ -170,7 +178,8 @@ public class FileService : IFileService
                     fileInfo.Name,
                     index.LineCount,
                     fileInfo.Length,
-                    partialEncodingName
+                    partialEncodingName,
+                    maxLineLength
                 ));
 
                 partialEmitted = true;
@@ -192,6 +201,10 @@ public class FileService : IFileService
         // Handle trailing \r at end of file
         if (prevWasCR)
         {
+            long nextLineOffset = stream.Length;
+            int lineByteLen = (int)(nextLineOffset - prevLineOffset);
+            if (lineByteLen > maxLineLength) maxLineLength = lineByteLen;
+            prevLineOffset = nextLineOffset;
             index.AddOffset(stream.Length);
         }
 
@@ -204,6 +217,14 @@ public class FileService : IFileService
             {
                 index.RemoveLastOffset();
             }
+        }
+
+        // Compute last line's byte length (from last line start to EOF)
+        {
+            int lastLineIdx = index.LineCount - 1;
+            long lastLineOffset = index.GetOffset(lastLineIdx);
+            int lastLineByteLen = (int)(stream.Length - lastLineOffset);
+            if (lastLineByteLen > maxLineLength) maxLineLength = lastLineByteLen;
         }
 
         // Report final 100% for large files
@@ -220,7 +241,7 @@ public class FileService : IFileService
         {
             previousEntry.Index.Dispose();
         }
-        _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc);
+        _lineIndexCache[filePath] = new CacheEntry(index, encoding, fileInfo.Length, fileInfo.LastWriteTimeUtc, maxLineLength);
 
         // Total lines = number of line start offsets
         var totalLines = index.LineCount;
@@ -232,7 +253,8 @@ public class FileService : IFileService
             fileInfo.Name,
             totalLines,
             fileInfo.Length,
-            encodingName
+            encodingName,
+            maxLineLength
         );
     }
 
@@ -257,7 +279,8 @@ public class FileService : IFileService
                     fi.Name,
                     existing.Index.LineCount,
                     existing.FileSize,
-                    encodingName
+                    encodingName,
+                    existing.MaxLineLength
                 );
             }
         }
@@ -505,6 +528,24 @@ public class FileService : IFileService
         }
 
         return matches;
+    }
+
+    /// <inheritdoc />
+    public int GetTotalLines(string filePath)
+    {
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
+
+        return cacheEntry.Index.LineCount;
+    }
+
+    /// <inheritdoc />
+    public int GetMaxLineLength(string filePath)
+    {
+        if (!_lineIndexCache.TryGetValue(filePath, out var cacheEntry))
+            throw new InvalidOperationException($"File has not been opened: {filePath}");
+
+        return cacheEntry.MaxLineLength;
     }
 
     /// <inheritdoc />

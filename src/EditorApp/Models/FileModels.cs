@@ -8,7 +8,7 @@ public record FileOpenResult(bool Success, string? FilePath, string? ErrorMessag
 /// <summary>
 /// Metadata returned when a file is opened for streamed reading.
 /// </summary>
-public record FileOpenMetadata(string FilePath, string FileName, int TotalLines, long FileSizeBytes, string Encoding);
+public record FileOpenMetadata(string FilePath, string FileName, int TotalLines, long FileSizeBytes, string Encoding, int MaxLineLength = 0);
 
 /// <summary>
 /// Result of reading a range of lines from a file.

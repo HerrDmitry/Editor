@@ -133,6 +133,10 @@ public class CancellationPropertyTests
 
         public void CloseFile(string filePath) { }
 
+        public int GetTotalLines(string filePath) => 100;
+
+        public int GetMaxLineLength(string filePath) => 80;
+
         public int GetLineCharLength(string filePath, int lineNumber) => 80;
 
         public Task<LineChunkResult> ReadLineChunkAsync(string filePath, int lineNumber, int startColumn, int columnCount, CancellationToken cancellationToken = default)

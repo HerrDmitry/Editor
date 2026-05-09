@@ -58,6 +58,9 @@ public class FileOpenedResponse : IMessage
 
     [JsonPropertyName("isRefresh")]
     public bool IsRefresh { get; set; }
+
+    [JsonPropertyName("maxLineLength")]
+    public int MaxLineLength { get; set; }
 }
 
 /// <summary>
@@ -147,4 +150,58 @@ public class LineChunkResponse : IMessage
 
     [JsonPropertyName("hasMore")]
     public bool HasMore { get; set; }
+}
+
+/// <summary>
+/// Request from the frontend for a viewport of text content with optional word-wrap support.
+/// </summary>
+public class RequestViewport : IMessage
+{
+    [JsonPropertyName("startLine")]
+    public int StartLine { get; set; }
+
+    [JsonPropertyName("lineCount")]
+    public int LineCount { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("columnCount")]
+    public int ColumnCount { get; set; }
+
+    [JsonPropertyName("wrapMode")]
+    public bool WrapMode { get; set; }
+
+    [JsonPropertyName("viewportColumns")]
+    public int ViewportColumns { get; set; }
+}
+
+/// <summary>
+/// Response containing viewport text content and metadata for scrollbar computation.
+/// </summary>
+public class ViewportResponse : IMessage
+{
+    [JsonPropertyName("lines")]
+    public string[] Lines { get; set; } = Array.Empty<string>();
+
+    [JsonPropertyName("startLine")]
+    public int StartLine { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("totalPhysicalLines")]
+    public int TotalPhysicalLines { get; set; }
+
+    [JsonPropertyName("lineLengths")]
+    public int[] LineLengths { get; set; } = Array.Empty<int>();
+
+    [JsonPropertyName("maxLineLength")]
+    public int MaxLineLength { get; set; }
+
+    [JsonPropertyName("totalVirtualLines")]
+    public int? TotalVirtualLines { get; set; }
+
+    [JsonPropertyName("truncated")]
+    public bool Truncated { get; set; }
 }

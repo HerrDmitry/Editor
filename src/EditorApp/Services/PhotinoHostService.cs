@@ -16,6 +16,7 @@ public class PhotinoHostService
     private readonly PhotinoBlazorApp _app;
     private readonly IMessageRouter _messageRouter;
     private readonly IFileService _fileService;
+    private readonly IViewportService? _viewportService;
 
     /// <summary>
     /// Lock for all _refreshCts and _scanCts dispose/create operations.
@@ -87,16 +88,24 @@ public class PhotinoHostService
     private volatile bool _pendingRefresh;
 
     /// <summary>
+    /// Stores the last viewport request parameters for replay after scan completion.
+    /// Written in HandleRequestViewportAsync, read in OpenFileByPathAsync after large-file scan.
+    /// Marked volatile for cross-thread visibility.
+    /// </summary>
+    private volatile RequestViewport? _lastViewportRequest;
+
+    /// <summary>
     /// Stored delegate for OnStaleFileDetected subscription so we can unsubscribe in Shutdown.
     /// (Fix 9.3: Event unsubscription)
     /// </summary>
     private Action<string>? _staleFileHandler;
 
-    public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService)
+    public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService, IViewportService? viewportService = null)
     {
         _app = app ?? throw new ArgumentNullException(nameof(app));
         _messageRouter = messageRouter ?? throw new ArgumentNullException(nameof(messageRouter));
         _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
+        _viewportService = viewportService;
 
         ConfigureWindow();
         RegisterMessageHandlers();
@@ -105,11 +114,12 @@ public class PhotinoHostService
     /// <summary>
     /// Internal constructor for unit testing — bypasses PhotinoBlazorApp window setup.
     /// </summary>
-    internal PhotinoHostService(IMessageRouter messageRouter, IFileService fileService)
+    internal PhotinoHostService(IMessageRouter messageRouter, IFileService fileService, IViewportService? viewportService = null)
     {
         _app = null!;
         _messageRouter = messageRouter ?? throw new ArgumentNullException(nameof(messageRouter));
         _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
+        _viewportService = viewportService;
 
         RegisterMessageHandlers();
     }
@@ -173,6 +183,7 @@ public class PhotinoHostService
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
         _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
         _messageRouter.RegisterHandler<RequestLineChunk>(HandleRequestLineChunkAsync);
+        _messageRouter.RegisterHandler<RequestViewport>(HandleRequestViewportAsync);
 
         // Subscribe to stale file detection — route through debounced refresh.
         // Store delegate reference so Shutdown can unsubscribe (Fix 9.3).
@@ -249,12 +260,17 @@ public class PhotinoHostService
                 });
             });
 
+            // Track whether partial metadata was emitted (large file path).
+            // Used to decide whether to push viewport after scan completion.
+            bool partialWasEmitted = false;
+
             // Partial metadata callback — sends partial FileOpenedResponse so UI can display content early.
             // Set path early so HandleRequestLinesAsync can serve lines during scan.
             // The line index cache is populated before this callback fires, so reads work.
             // If scan later fails, catch blocks will clear _currentFilePath.
             Action<FileOpenMetadata> onPartialMetadata = (partialMeta) =>
             {
+                partialWasEmitted = true;
                 _currentFilePath = filePath;
                 _ = _messageRouter.SendToUIAsync(new FileOpenedResponse
                 {
@@ -262,7 +278,8 @@ public class PhotinoHostService
                     TotalLines = partialMeta.TotalLines,
                     FileSizeBytes = partialMeta.FileSizeBytes,
                     Encoding = partialMeta.Encoding,
-                    IsPartial = true
+                    IsPartial = true,
+                    MaxLineLength = partialMeta.MaxLineLength
                 });
             };
 
@@ -288,8 +305,51 @@ public class PhotinoHostService
                 TotalLines = metadata.TotalLines,
                 FileSizeBytes = metadata.FileSizeBytes,
                 Encoding = metadata.Encoding,
-                IsPartial = false
+                IsPartial = false,
+                MaxLineLength = metadata.MaxLineLength
             });
+
+            // Push viewport content after scan completion for large files.
+            // Small files (no partialWasEmitted) skip this entirely.
+            if (partialWasEmitted && _viewportService is not null)
+            {
+                if (!scanToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var vp = _lastViewportRequest;
+                        var startLine = vp?.StartLine ?? 0;
+                        var lineCount = vp?.LineCount ?? 100;
+                        var startColumn = vp?.StartColumn ?? 0;
+                        var columnCount = vp?.ColumnCount ?? 200;
+                        var wrapMode = vp?.WrapMode ?? false;
+                        var viewportColumns = vp?.ViewportColumns ?? 200;
+
+                        var result = await _viewportService.GetViewportAsync(
+                            filePath, startLine, lineCount, startColumn, columnCount, wrapMode, viewportColumns, scanToken);
+
+                        await _messageRouter.SendToUIAsync(new ViewportResponse
+                        {
+                            Lines = result.Lines,
+                            StartLine = result.StartLine,
+                            StartColumn = result.StartColumn,
+                            TotalPhysicalLines = result.TotalPhysicalLines,
+                            LineLengths = result.LineLengths,
+                            MaxLineLength = result.MaxLineLength,
+                            TotalVirtualLines = result.TotalVirtualLines,
+                            Truncated = result.Truncated
+                        });
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Scan was cancelled, skip viewport push
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"[WARN] Failed to push viewport after scan complete: {ex.Message}");
+                    }
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -455,6 +515,79 @@ public class PhotinoHostService
     }
 
     /// <summary>
+    /// Handle a <see cref="RequestViewport"/> from the React frontend:
+    /// read the requested viewport slice and send it back.
+    /// </summary>
+    private async Task HandleRequestViewportAsync(RequestViewport request)
+    {
+        _lastViewportRequest = request;
+
+        try
+        {
+            if (string.IsNullOrEmpty(_currentFilePath))
+            {
+                await _messageRouter.SendToUIAsync(new ErrorResponse
+                {
+                    ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                    Message = "No file is currently open."
+                });
+                return;
+            }
+
+            if (_viewportService is null)
+            {
+                await _messageRouter.SendToUIAsync(new ErrorResponse
+                {
+                    ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                    Message = "Viewport service is not available."
+                });
+                return;
+            }
+
+            var result = await _viewportService.GetViewportAsync(
+                _currentFilePath,
+                request.StartLine,
+                request.LineCount,
+                request.StartColumn,
+                request.ColumnCount,
+                request.WrapMode,
+                request.ViewportColumns);
+
+            await _messageRouter.SendToUIAsync(new ViewportResponse
+            {
+                Lines = result.Lines,
+                StartLine = result.StartLine,
+                StartColumn = result.StartColumn,
+                TotalPhysicalLines = result.TotalPhysicalLines,
+                LineLengths = result.LineLengths,
+                MaxLineLength = result.MaxLineLength,
+                TotalVirtualLines = result.TotalVirtualLines,
+                Truncated = result.Truncated
+            });
+        }
+        catch (FileNotFoundException ex)
+        {
+            Console.Error.WriteLine($"[ERROR] File not found during viewport read: {ex.FileName}\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.FILE_NOT_FOUND.ToString(),
+                Message = "The file could not be found. It may have been moved or deleted.",
+                Details = ex.FileName
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] Error reading viewport\n{ex}");
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                Message = "An unexpected error occurred while reading the viewport.",
+                Details = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
     /// Start watching the given file path. Disposes previous watcher if any.
     /// </summary>
     private void StartWatching(string filePath)
@@ -570,7 +703,8 @@ public class PhotinoHostService
                     FileSizeBytes = metadata.FileSizeBytes,
                     Encoding = metadata.Encoding,
                     IsPartial = false,
-                    IsRefresh = true
+                    IsRefresh = true,
+                    MaxLineLength = metadata.MaxLineLength
                 });
             }
         }
