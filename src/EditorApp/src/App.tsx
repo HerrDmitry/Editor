@@ -9,12 +9,14 @@ interface FileMeta {
   encoding: string;
   isPartial: boolean;
   isRefresh: boolean;
+  maxLineLength: number;
 }
 
 interface LinesResponsePayload {
   startLine: number;
   lines: string[];
   totalLines: number;
+  lineLengths?: number[];
 }
 
 interface ErrorInfo {
@@ -36,6 +38,7 @@ function App() {
   const [fileMeta, setFileMeta] = React.useState<FileMeta | null>(null);
   const [lines, setLines] = React.useState<string[] | null>(null);
   const [linesStartLine, setLinesStartLine] = React.useState(0);
+  const [lineLengths, setLineLengths] = React.useState<number[] | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [error, setError] = React.useState<ErrorInfo | null>(null);
   const [titleBarText, setTitleBarText] = React.useState('Editor');
@@ -87,6 +90,8 @@ function App() {
   React.useEffect(() => {
     const interop = (window as any).createInteropService();
     interopRef.current = interop;
+    // Expose on window so ContentArea can register chunk handlers
+    (window as any).interopService = interop;
 
     interop.onFileOpened((data: FileMeta) => {
       if (data.isRefresh) {
@@ -169,6 +174,13 @@ function App() {
     });
 
     interop.onLinesResponse((data: LinesResponsePayload) => {
+      // Capture lineLengths from response
+      if (data.lineLengths != null) {
+        setLineLengths(data.lineLengths);
+      } else {
+        setLineLengths(null);
+      }
+
       // Jump request — replace buffer entirely, don't merge
       if (isJumpRequestRef.current) {
         isJumpRequestRef.current = false;
@@ -256,6 +268,7 @@ function App() {
         fileMeta,
         lines,
         linesStartLine,
+        lineLengths,
         isLoading,
         error,
         wrapLines,

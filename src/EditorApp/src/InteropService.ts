@@ -74,7 +74,7 @@ const MessageTypes = {
  */
 interface InteropService {
   sendOpenFileRequest(): void;
-  sendRequestLines(startLine: number, lineCount: number): void;
+  sendRequestLines(startLine: number, lineCount: number, startColumn?: number, columnCount?: number): void;
   sendRequestLineChunk(lineNumber: number, startColumn: number, columnCount: number): void;
   onFileOpened(callback: (data: FileMeta) => void): void;
   onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
@@ -215,10 +215,10 @@ function createInteropService(): InteropService {
       }
     },
 
-    sendRequestLines(startLine: number, lineCount: number): void {
+    sendRequestLines(startLine: number, lineCount: number, startColumn?: number, columnCount?: number): void {
       const envelope: MessageEnvelope = {
         type: MessageTypes.RequestLinesMessage,
-        payload: { startLine, lineCount },
+        payload: { startLine, lineCount, startColumn: startColumn ?? 0, columnCount: columnCount ?? 0 },
         timestamp: new Date().toISOString(),
       };
 

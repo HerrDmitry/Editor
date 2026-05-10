@@ -342,7 +342,6 @@ public class FileService : IFileService
         var encoding = cacheEntry.Encoding;
         var lines = new string[lineCount];
         var lineLengths = new int[lineCount];
-        bool hasLargeLines = false;
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -376,7 +375,6 @@ public class FileService : IFileService
                     var chunk = await ReadLineChunkAsync(filePath, currentLine, 0, ChunkSizeChars, cancellationToken);
                     lines[i] = chunk.Text;
                     lineLengths[i] = chunk.TotalLineChars;
-                    hasLargeLines = true;
                 }
                 else
                 {
@@ -407,10 +405,8 @@ public class FileService : IFileService
             }
         }
 
-        // Set lineLengths to null when all lines are normal (backward compat)
-        int[]? resultLineLengths = hasLargeLines ? lineLengths : null;
-
-        return new LinesResult(startLine, lines, snapshotCount, resultLineLengths);
+        // Always send lineLengths so frontend has accurate char counts for horizontal scrolling
+        return new LinesResult(startLine, lines, snapshotCount, lineLengths);
     }
 
     /// <inheritdoc />
