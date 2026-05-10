@@ -34,6 +34,12 @@ public class RequestLinesMessage : IMessage
 
     [JsonPropertyName("lineCount")]
     public int LineCount { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("columnCount")]
+    public int ColumnCount { get; set; }
 }
 
 /// <summary>

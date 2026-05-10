@@ -96,6 +96,7 @@ declare namespace React {
   interface WheelEvent<T = Element> extends SyntheticEvent<T> {
     deltaY: number;
     deltaX: number;
+    shiftKey: boolean;
     preventDefault(): void;
   }
 

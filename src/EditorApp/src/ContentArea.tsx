@@ -30,9 +30,6 @@ const SCROLLBAR_VIEWPORT_SIZE = 50;
 /** Lines with more chars than this are "large" and use horizontal virtualization. */
 const LARGE_LINE_THRESHOLD = 65_536;
 
-/** Number of characters visible in the horizontal viewport. */
-const H_VIEWPORT_CHARS = 200;
-
 /** Column window buffer: chars loaded ahead/behind the visible viewport. */
 const H_WINDOW_CHARS = 600;
 
@@ -44,6 +41,7 @@ const COPY_TIMEOUT_MS = 10_000;
 
 interface FileMeta {
   totalLines: number;
+  maxLineLength: number;
 }
 
 interface ErrorInfo {
@@ -56,6 +54,7 @@ interface ContentAreaProps {
   fileMeta: FileMeta | null;
   lines: string[] | null;
   linesStartLine: number;
+  lineLengths: number[] | null;
   isLoading: boolean;
   error: ErrorInfo | null;
   wrapLines: boolean;
@@ -79,7 +78,7 @@ interface SearchMatchInfo {
   matchLength: number;
 }
 
-function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLines, onRequestLines, onJumpToLine, onTrimBuffer }: ContentAreaProps) {
+function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, error, wrapLines, onRequestLines, onJumpToLine, onTrimBuffer }: ContentAreaProps) {
   const viewportRef = React.useRef<HTMLDivElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
   const pendingRequestRef = React.useRef(false);
@@ -88,22 +87,27 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
   const jumpTargetLineRef = React.useRef(0);
   const dragDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // --- Task 2.1: Character cell width measurement probe ---
+  const charProbeRef = React.useRef<HTMLSpanElement>(null);
+  const [charCellWidth, setCharCellWidth] = React.useState(7.2);
+
+  // --- Task 2.2: Dynamic viewport column measurement ---
+  const contentMeasureRef = React.useRef<HTMLDivElement>(null);
+  const [viewportColumns, setViewportColumns] = React.useState(200);
+
   // Scrollbar position = first visible logical line number
   const [scrollbarPosition, setScrollbarPosition] = React.useState(0);
 
   // --- Horizontal virtualization state ---
 
-  /** Current horizontal scroll column offset. */
-  const [hScrollCol, setHScrollCol] = React.useState(0);
+  /** Current horizontal scroll column offset (clamped via clampScrollColumn). */
+  const [scrollColumn, setScrollColumn] = React.useState(0);
 
   /** Per-line chunk cache: Map<lineNumber, ChunkCacheEntry>. */
   const chunkCacheRef = React.useRef<Map<number, ChunkCacheEntry>>(new Map());
 
   /** LRU counter — incremented on each cache insert/access. */
   const lruCounterRef = React.useRef(0);
-
-  /** Per-line character lengths from LinesResponse. null = all lines normal. */
-  const [lineLengths, setLineLengths] = React.useState<number[] | null>(null);
 
   /** Force re-render counter (used when chunk cache updates). */
   const [chunkVersion, setChunkVersion] = React.useState(0);
@@ -123,38 +127,104 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
   bufferRef.current = { start: linesStartLine, count: lines ? lines.length : 0 };
   const fileMetaRef = React.useRef(fileMeta);
   fileMetaRef.current = fileMeta;
-  const hScrollColRef = React.useRef(hScrollCol);
-  hScrollColRef.current = hScrollCol;
+  const scrollColumnRef = React.useRef(scrollColumn);
+  scrollColumnRef.current = scrollColumn;
   const lineLengthsRef = React.useRef(lineLengths);
   lineLengthsRef.current = lineLengths;
+
+  // --- Task 8.4: Compute max line length across buffered lines ---
+  // Primary: use actual line lengths from lineLengths array (exact char counts from backend).
+  // Secondary: use line.length from buffer for normal lines.
+  // Fallback: fileMeta.maxLineLength (byte-based approximate, used before lines arrive).
+  const maxLineLength = React.useMemo(() => {
+    let max = 0;
+
+    // From lineLengths (per-line char counts, exact)
+    if (lineLengths && lineLengths.length > 0) {
+      for (const len of lineLengths) {
+        if (len > max) max = len;
+      }
+    }
+
+    // From actual buffer line lengths (for normal files where lineLengths covers all)
+    if (lines && lines.length > 0 && max === 0) {
+      for (const line of lines) {
+        if (line.length > max) max = line.length;
+      }
+    }
+
+    // If we have actual data, use it. Otherwise fall back to fileMeta (approximate).
+    if (max > 0) return max;
+    if (fileMeta && fileMeta.maxLineLength > 0) return fileMeta.maxLineLength;
+    return 0;
+  }, [fileMeta, lineLengths, lines]);
 
   // Track previous buffer to detect prepend/append
   const prevStartRef = React.useRef(linesStartLine);
   const prevCountRef = React.useRef(lines ? lines.length : 0);
 
-  // --- Task 8.5: Wire lineLengths from LinesResponse ---
-  // Register for LinesResponse via interopService to capture lineLengths.
-  React.useEffect(() => {
-    const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.onLinesResponse !== 'function') return;
-
-    function handleLinesResponse(data: { startLine: number; lines: string[]; totalLines: number; lineLengths?: number[] }) {
-      if (data.lineLengths != null) {
-        setLineLengths(data.lineLengths);
-      } else {
-        // All-normal response — clear large-line state
-        setLineLengths(null);
-      }
+  // --- Task 2.1: Measure character cell width on mount ---
+  React.useLayoutEffect(() => {
+    const probe = charProbeRef.current;
+    if (!probe) return;
+    const width = probe.getBoundingClientRect().width;
+    if (width > 0) {
+      setCharCellWidth(width);
     }
-
-    interop.onLinesResponse(handleLinesResponse);
-    // Note: InteropService accumulates callbacks; no unregister needed for this pattern.
+    // else: keep fallback default of 7.2px
   }, []);
 
-  // --- Task 8.3: Register for chunk responses ---
+  // --- Task 2.2: ResizeObserver for dynamic viewportColumns calculation ---
   React.useEffect(() => {
+    const el = contentMeasureRef.current || viewportRef.current;
+    if (!el) return;
+
+    function computeColumns(pixelWidth: number) {
+      // Subtract line-number gutter (60px width + 12px padding)
+      const contentWidth = Math.max(0, pixelWidth - 72);
+      const cols = Math.floor(contentWidth / charCellWidth);
+      setViewportColumns(Math.max(1, cols));
+    }
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const width = entry.contentRect.width;
+          computeColumns(width);
+        }
+      });
+      ro.observe(el);
+      // Initial measurement
+      computeColumns(el.clientWidth);
+      return () => { ro.disconnect(); };
+    } else {
+      // Fallback: window resize event with debounce
+      computeColumns(el.clientWidth);
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      function handleResize() {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          const measuredEl = contentMeasureRef.current || viewportRef.current;
+          if (measuredEl) computeColumns(measuredEl.clientWidth);
+        }, 100);
+      }
+      window.addEventListener('resize', handleResize);
+      return () => {
+        window.removeEventListener('resize', handleResize);
+        if (debounceTimer) clearTimeout(debounceTimer);
+      };
+    }
+  }, [charCellWidth]);
+
+  // lineLengths now comes via props from App.tsx
+
+  // --- Task 8.3: Register for chunk responses ---
+  const chunkRegisteredRef = React.useRef(false);
+  React.useEffect(() => {
+    if (chunkRegisteredRef.current) return;
     const interop = (window as any).interopService as any;
     if (!interop || typeof interop.onLineChunkResponse !== 'function') return;
+    chunkRegisteredRef.current = true;
 
     function handleChunkResponse(data: { lineNumber: number; startColumn: number; text: string; totalLineChars: number; hasMore: boolean }) {
       const cache = chunkCacheRef.current;
@@ -189,7 +259,7 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     }
 
     interop.onLineChunkResponse(handleChunkResponse);
-  }, []);
+  }, [fileMeta]);
 
   // --- Task 8.3: Vertical-scroll cleanup — evict cache entries outside buffer ---
   React.useEffect(() => {
@@ -390,39 +460,41 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     pendingRequestRef.current = false;
   }, [linesStartLine, lines]);
 
-  // --- Task 8.4: Horizontal scrollbar drag handler ---
-  const handleHScrollChange = React.useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const newCol = Number(e.target.value);
-    setHScrollCol(newCol);
+  // --- Task 5.1: Horizontal CustomScrollbar drag handler ---
+  const handleHScrollbarDrag = React.useCallback((newCol: number) => {
+    const clamped = clampScrollColumn(Math.round(newCol), maxLineLength, viewportColumns);
+    setScrollColumn(clamped);
+    // Chunk requests are handled by render-time requestChunk (debounced)
+  }, [maxLineLength, viewportColumns]);
 
-    // Trigger chunk requests for large lines intersecting the new viewport
-    const currentLines = lines;
-    const currentLineLengths = lineLengthsRef.current;
-    if (!currentLines || !currentLineLengths) return;
+  // --- Task 6.1: Shift+wheel horizontal scroll handler ---
+  const handleWheel = React.useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    // In wrap mode: ignore horizontal wheel input entirely
+    if (wrapLines) return;
 
-    const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
+    // Detect horizontal scroll intent:
+    // 1. Shift+wheel (deltaY with shift held) — always horizontal
+    // 2. Pure horizontal wheel/trackpad (deltaX !== 0 AND deltaY === 0) — only when no vertical component
+    const isShiftWheel = e.shiftKey && e.deltaY !== 0;
+    const isPureHorizontalWheel = !e.shiftKey && e.deltaX !== 0 && e.deltaY === 0;
 
-    const cache = chunkCacheRef.current;
-    for (let i = 0; i < currentLines.length; i++) {
-      const lineLength = currentLineLengths[i] ?? currentLines[i].length;
-      if (lineLength <= LARGE_LINE_THRESHOLD) continue;
-      if (newCol >= lineLength) continue; // line ends before viewport
+    if (!isShiftWheel && !isPureHorizontalWheel) return;
 
-      const lineNumber = linesStartLine + i;
-      const cached = cache.get(lineNumber);
-      const visibleEnd = Math.min(newCol + H_VIEWPORT_CHARS, lineLength);
+    // Prevent default to avoid page scroll / native horizontal scroll
+    e.preventDefault();
 
-      // Check if cache covers the new viewport
-      if (cached && cached.startCol <= newCol && cached.startCol + cached.text.length >= visibleEnd) {
-        continue; // cache hit
-      }
+    // Determine delta: use deltaY for shift+wheel, deltaX for horizontal wheel/trackpad
+    const delta = isShiftWheel ? e.deltaY : e.deltaX;
 
-      // Cache miss — request chunk centered on new viewport
-      const chunkStart = Math.max(0, newCol - Math.floor((H_WINDOW_CHARS - H_VIEWPORT_CHARS) / 2));
-      interop.sendRequestLineChunk(lineNumber, chunkStart, H_WINDOW_CHARS);
-    }
-  }, [lines, linesStartLine]);
+    // Normalize to ±1 wheel tick
+    const wheelTicks = Math.sign(delta);
+
+    // Adjust scrollColumn by ±3 columns per tick
+    const adjustment = 3 * wheelTicks;
+
+    setScrollColumn(prev => clampScrollColumn(prev + adjustment, maxLineLength, viewportColumns));
+    // Chunk requests handled by render-time requestChunk (debounced)
+  }, [wrapLines, maxLineLength, viewportColumns]);
 
   // --- Task 10.1: Selection-aware chunk loading for copy ---
   const handleCopy = React.useCallback((e: Event) => {
@@ -571,9 +643,9 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
 
   // --- Task 11.2: Scroll to search match in large line ---
   const scrollToSearchMatch = React.useCallback((lineNumber: number, matchColumn: number, matchLength: number) => {
-    // Set hScrollCol to center match in viewport
-    const targetCol = Math.max(0, matchColumn - Math.floor(H_VIEWPORT_CHARS / 2));
-    setHScrollCol(targetCol);
+    // Set scrollColumn to center match in viewport
+    const targetCol = Math.max(0, matchColumn - Math.floor(viewportColumns / 2));
+    setScrollColumn(clampScrollColumn(targetCol, maxLineLength, viewportColumns));
 
     // Store match info for highlighting
     setSearchMatch({ lineNumber, matchColumn, matchLength });
@@ -583,7 +655,7 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     const cached = cache.get(lineNumber);
     const matchEnd = matchColumn + matchLength;
 
-    if (cached && cached.startCol <= targetCol && cached.startCol + cached.text.length >= Math.min(targetCol + H_VIEWPORT_CHARS, matchEnd)) {
+    if (cached && cached.startCol <= targetCol && cached.startCol + cached.text.length >= Math.min(targetCol + viewportColumns, matchEnd)) {
       // Cache hit — chunk already covers the match area
       return;
     }
@@ -591,9 +663,9 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     // Cache miss — request chunk centered on match
     const interop = (window as any).interopService as any;
     if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
-    const chunkStart = Math.max(0, targetCol - Math.floor((H_WINDOW_CHARS - H_VIEWPORT_CHARS) / 2));
+    const chunkStart = Math.max(0, targetCol - Math.floor((H_WINDOW_CHARS - viewportColumns) / 2));
     interop.sendRequestLineChunk(lineNumber, chunkStart, H_WINDOW_CHARS);
-  }, []);
+  }, [maxLineLength, viewportColumns]);
 
   // Expose scrollToSearchMatch on window for search system
   React.useEffect(() => {
@@ -601,12 +673,28 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     return () => { delete (window as any).scrollToSearchMatch; };
   }, [scrollToSearchMatch]);
 
-  // --- Task 8.2: Helper to request a chunk for a large line ---
+  // --- Task 8.2: Helper to request a chunk for a large line (debounced) ---
+  const pendingChunkRequestsRef = React.useRef<Map<number, number>>(new Map());
+  const chunkRequestTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function requestChunk(lineNumber: number, visibleStart: number): void {
-    const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
-    const chunkStart = Math.max(0, visibleStart - Math.floor((H_WINDOW_CHARS - H_VIEWPORT_CHARS) / 2));
-    interop.sendRequestLineChunk(lineNumber, chunkStart, H_WINDOW_CHARS);
+    // Batch chunk requests — only fire after 150ms of no new requests
+    pendingChunkRequestsRef.current.set(lineNumber, visibleStart);
+
+    if (chunkRequestTimerRef.current) {
+      clearTimeout(chunkRequestTimerRef.current);
+    }
+    chunkRequestTimerRef.current = setTimeout(() => {
+      const interop = (window as any).interopService as any;
+      if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
+
+      const pending = pendingChunkRequestsRef.current;
+      for (const [lineNum, startCol] of pending.entries()) {
+        const chunkStart = Math.max(0, startCol - Math.floor((H_WINDOW_CHARS - viewportColumns) / 2));
+        interop.sendRequestLineChunk(lineNum, chunkStart, H_WINDOW_CHARS);
+      }
+      pending.clear();
+    }, 150);
   }
 
   // --- Task 8.2: Render a single line (large or normal) ---
@@ -618,14 +706,26 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     const isLarge = lineLength > LARGE_LINE_THRESHOLD;
 
     if (!isLarge) {
-      // Normal line — render fully
+      // Normal line — in no-wrap mode, render only the visible column window
+      if (!wrapLines) {
+        const visibleText = line.slice(scrollColumn, scrollColumn + viewportColumns);
+        return (
+          <pre
+            className="content-line"
+            style={{
+              whiteSpace: 'pre',
+              margin: 0, flex: 1, minWidth: 0,
+            }}
+          >{visibleText}</pre>
+        );
+      }
       return (
         <pre
           className="content-line"
           style={{
-            whiteSpace: wrapLines ? 'pre-wrap' : 'pre',
+            whiteSpace: 'pre-wrap',
             margin: 0, flex: 1, minWidth: 0,
-            wordBreak: wrapLines ? 'break-all' : 'normal',
+            wordBreak: 'break-all',
           }}
         >{line}</pre>
       );
@@ -649,16 +749,16 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     }
 
     // Large line — horizontal virtualization
-    const visibleStart = hScrollCol;
-    const visibleEnd = Math.min(hScrollCol + H_VIEWPORT_CHARS, lineLength);
+    const visibleStart = scrollColumn;
+    const visibleEnd = Math.min(scrollColumn + viewportColumns, lineLength);
 
     // Normal (short) line that ends before the horizontal viewport
-    if (lineLength <= hScrollCol) {
+    if (lineLength <= scrollColumn) {
       return (
         <pre
           className="content-line content-line--large"
           style={{ whiteSpace: 'pre', margin: 0, flex: 1, minWidth: 0 }}
-        >{' '.repeat(H_VIEWPORT_CHARS)}</pre>
+        >{' '.repeat(viewportColumns)}</pre>
       );
     }
 
@@ -708,15 +808,18 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     );
   }
 
-  // --- Task 8.4: Compute max line length across buffered lines ---
-  const maxLineLength = React.useMemo(() => {
-    if (!lineLengths || lineLengths.length === 0) return 0;
-    let max = 0;
-    for (const len of lineLengths) {
-      if (len > max) max = len;
-    }
-    return max;
-  }, [lineLengths]);
+  // --- Task 3.2: Reset scrollColumn on file open ---
+  React.useEffect(() => {
+    setScrollColumn(0);
+  }, [fileMeta]);
+
+  // --- Task 3.2: Clamp scrollColumn when maxLineLength or viewportColumns changes ---
+  React.useEffect(() => {
+    setScrollColumn(prev => {
+      if (viewportColumns >= maxLineLength) return 0;
+      return clampScrollColumn(prev, maxLineLength, viewportColumns);
+    });
+  }, [maxLineLength, viewportColumns]);
 
   // --- Early returns (after all hooks) ---
 
@@ -750,10 +853,24 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
     );
   }
 
-  const showHScrollbar = !wrapLines && maxLineLength > H_VIEWPORT_CHARS;
+  const showHScrollbar = !wrapLines && maxLineLength > viewportColumns;
 
   return (
     <div className="content-area content-area--virtual" style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+      {/* Task 2.1: Hidden probe for measuring monospace character cell width */}
+      <span
+        ref={charProbeRef}
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          visibility: 'hidden',
+          whiteSpace: 'pre',
+          fontFamily: 'monospace',
+          fontSize: 'inherit',
+          lineHeight: 'inherit',
+          pointerEvents: 'none',
+        }}
+      >M</span>
       {/* Task 10.1: Copy loading indicator */}
       {copyLoading && (
         <div
@@ -787,7 +904,8 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
           className="content-column content-column--hidden-scrollbar"
           ref={viewportRef}
           onScroll={handleScroll}
-          style={{ overflowY: 'auto', overflowX: wrapLines ? 'hidden' : 'auto', flex: 1, minWidth: 0 }}
+          onWheel={handleWheel}
+          style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, minWidth: 0 }}
         >
           <div ref={containerRef}>
             {lines && lines.map((line: string, index: number) => (
@@ -818,25 +936,14 @@ function ContentArea({ fileMeta, lines, linesStartLine, isLoading, error, wrapLi
           onPositionChange: handleScrollbarDrag,
         })}
       </div>
-      {showHScrollbar && (
-        <div
-          className="horizontal-scrollbar-container"
-          style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', padding: '2px 4px', flexShrink: 0 }}
-        >
-          {/* Offset to align with content (past line-number column) */}
-          <div style={{ width: 60, flexShrink: 0 }} />
-          <input
-            type="range"
-            className="horizontal-scrollbar"
-            min={0}
-            max={maxLineLength - H_VIEWPORT_CHARS}
-            value={String(hScrollCol)}
-            onChange={handleHScrollChange}
-            style={{ flex: 1 }}
-            aria-label="Horizontal scroll"
-          />
-        </div>
-      )}
+      {showHScrollbar && React.createElement((window as any).CustomScrollbar, {
+        key: 'h-scrollbar',
+        orientation: 'horizontal',
+        range: maxLineLength > viewportColumns ? maxLineLength - viewportColumns : viewportColumns,
+        position: scrollColumn,
+        viewportSize: viewportColumns,
+        onPositionChange: handleHScrollbarDrag,
+      })}
     </div>
   );
 }
