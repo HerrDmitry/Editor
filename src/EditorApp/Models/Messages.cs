@@ -123,9 +123,18 @@ public class FileLoadProgressMessage : IMessage
 }
 
 /// <summary>
-/// Request from frontend for a chunk of a large line.
+/// Batch request from the frontend for multiple line chunks in a single round-trip.
 /// </summary>
-public class RequestLineChunk : IMessage
+public class RequestLineChunkBatch : IMessage
+{
+    [JsonPropertyName("items")]
+    public ChunkRequestItem[] Items { get; set; } = Array.Empty<ChunkRequestItem>();
+}
+
+/// <summary>
+/// A single item within a batch chunk request.
+/// </summary>
+public class ChunkRequestItem
 {
     [JsonPropertyName("lineNumber")]
     public int LineNumber { get; set; }
@@ -135,27 +144,6 @@ public class RequestLineChunk : IMessage
 
     [JsonPropertyName("columnCount")]
     public int ColumnCount { get; set; }
-}
-
-/// <summary>
-/// Response with a chunk of line content.
-/// </summary>
-public class LineChunkResponse : IMessage
-{
-    [JsonPropertyName("lineNumber")]
-    public int LineNumber { get; set; }
-
-    [JsonPropertyName("startColumn")]
-    public int StartColumn { get; set; }
-
-    [JsonPropertyName("text")]
-    public string Text { get; set; } = string.Empty;
-
-    [JsonPropertyName("totalLineChars")]
-    public int TotalLineChars { get; set; }
-
-    [JsonPropertyName("hasMore")]
-    public bool HasMore { get; set; }
 }
 
 /// <summary>
@@ -210,4 +198,34 @@ public class ViewportResponse : IMessage
 
     [JsonPropertyName("truncated")]
     public bool Truncated { get; set; }
+}
+
+/// <summary>
+/// Batch response containing chunks for multiple lines.
+/// </summary>
+public class LineChunkBatchResponse : IMessage
+{
+    [JsonPropertyName("items")]
+    public ChunkResponseItem[] Items { get; set; } = Array.Empty<ChunkResponseItem>();
+}
+
+/// <summary>
+/// A single chunk response item within a batch response.
+/// </summary>
+public class ChunkResponseItem
+{
+    [JsonPropertyName("lineNumber")]
+    public int LineNumber { get; set; }
+
+    [JsonPropertyName("startColumn")]
+    public int StartColumn { get; set; }
+
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = string.Empty;
+
+    [JsonPropertyName("totalLineChars")]
+    public int TotalLineChars { get; set; }
+
+    [JsonPropertyName("hasMore")]
+    public bool HasMore { get; set; }
 }

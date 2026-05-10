@@ -223,42 +223,40 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
   React.useEffect(() => {
     if (chunkRegisteredRef.current) return;
     const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.onLineChunkResponse !== 'function') return;
+    if (!interop || typeof interop.onLineChunkBatchResponse !== 'function') return;
     chunkRegisteredRef.current = true;
 
-    function handleChunkResponse(data: { lineNumber: number; startColumn: number; text: string; totalLineChars: number; hasMore: boolean }) {
+    function handleBatchChunkResponse(data: { items: Array<{ lineNumber: number; startColumn: number; text: string; totalLineChars: number; hasMore: boolean }> }) {
       const cache = chunkCacheRef.current;
-      const lruOrder = ++lruCounterRef.current;
-      const entry: ChunkCacheEntry = { startCol: data.startColumn, text: data.text, lruOrder };
-      cache.set(data.lineNumber, entry);
+      for (const item of data.items) {
+        const lruOrder = ++lruCounterRef.current;
+        const entry: ChunkCacheEntry = { startCol: item.startColumn, text: item.text, lruOrder };
+        cache.set(item.lineNumber, entry);
 
-      // Resolve pending copy chunk if waiting
-      const resolver = pendingCopyChunksRef.current.get(data.lineNumber);
-      if (resolver) {
-        resolver(entry);
-        pendingCopyChunksRef.current.delete(data.lineNumber);
+        // Resolve pending copy chunk if waiting
+        const resolver = pendingCopyChunksRef.current.get(item.lineNumber);
+        if (resolver) {
+          resolver(entry);
+          pendingCopyChunksRef.current.delete(item.lineNumber);
+        }
       }
 
       // Evict if total chars exceed MAX_CHUNK_CACHE_CHARS
       let totalChars = 0;
-      for (const entry of cache.values()) {
-        totalChars += entry.text.length;
-      }
+      for (const e of cache.values()) { totalChars += e.text.length; }
       if (totalChars > MAX_CHUNK_CACHE_CHARS) {
-        // Collect entries sorted by LRU order (oldest first)
         const sorted = Array.from(cache.entries()).sort((a, b) => a[1].lruOrder - b[1].lruOrder);
-        for (const [lineNum, entry] of sorted) {
+        for (const [lineNum, e] of sorted) {
           if (totalChars <= MAX_CHUNK_CACHE_CHARS) break;
-          totalChars -= entry.text.length;
+          totalChars -= e.text.length;
           cache.delete(lineNum);
         }
       }
 
-      // Trigger re-render so newly cached chunk is displayed
       setChunkVersion(v => v + 1);
     }
 
-    interop.onLineChunkResponse(handleChunkResponse);
+    interop.onLineChunkBatchResponse(handleBatchChunkResponse);
   }, [fileMeta]);
 
   // --- Task 8.3: Vertical-scroll cleanup — evict cache entries outside buffer ---
@@ -553,7 +551,7 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
     setCopyError(null);
 
     const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.sendRequestLineChunk !== 'function') {
+    if (!interop || typeof interop.sendRequestLineChunkBatch !== 'function') {
       setCopyLoading(false);
       setCopyError('Copy failed: interop not available');
       setTimeout(() => setCopyError(null), 3000);
@@ -570,10 +568,15 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
         });
       });
       chunkPromises.push(promise);
-
-      // Request full line (start at 0, request full length)
-      interop.sendRequestLineChunk(lineInfo.lineNumber, 0, lineInfo.lineLength);
     }
+
+    // Send single batch request for all lines needing full content
+    const items = linesNeedingChunks.map(info => ({
+      lineNumber: info.lineNumber,
+      startColumn: 0,
+      columnCount: info.lineLength,
+    }));
+    interop.sendRequestLineChunkBatch(items);
 
     // Wait for all chunks with timeout
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
@@ -660,11 +663,11 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
       return;
     }
 
-    // Cache miss — request chunk centered on match
+    // Cache miss — request chunk centered on match (single-item batch)
     const interop = (window as any).interopService as any;
-    if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
+    if (!interop || typeof interop.sendRequestLineChunkBatch !== 'function') return;
     const chunkStart = Math.max(0, targetCol - Math.floor((H_WINDOW_CHARS - viewportColumns) / 2));
-    interop.sendRequestLineChunk(lineNumber, chunkStart, H_WINDOW_CHARS);
+    interop.sendRequestLineChunkBatch([{ lineNumber, startColumn: chunkStart, columnCount: H_WINDOW_CHARS }]);
   }, [maxLineLength, viewportColumns]);
 
   // Expose scrollToSearchMatch on window for search system
@@ -686,14 +689,19 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
     }
     chunkRequestTimerRef.current = setTimeout(() => {
       const interop = (window as any).interopService as any;
-      if (!interop || typeof interop.sendRequestLineChunk !== 'function') return;
+      if (!interop || typeof interop.sendRequestLineChunkBatch !== 'function') return;
 
       const pending = pendingChunkRequestsRef.current;
+      const items: Array<{ lineNumber: number; startColumn: number; columnCount: number }> = [];
       for (const [lineNum, startCol] of pending.entries()) {
         const chunkStart = Math.max(0, startCol - Math.floor((H_WINDOW_CHARS - viewportColumns) / 2));
-        interop.sendRequestLineChunk(lineNum, chunkStart, H_WINDOW_CHARS);
+        items.push({ lineNumber: lineNum, startColumn: chunkStart, columnCount: H_WINDOW_CHARS });
       }
       pending.clear();
+
+      if (items.length > 0) {
+        interop.sendRequestLineChunkBatch(items);
+      }
     }, 150);
   }
 

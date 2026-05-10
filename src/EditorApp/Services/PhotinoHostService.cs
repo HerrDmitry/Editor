@@ -182,7 +182,7 @@ public class PhotinoHostService
     {
         _messageRouter.RegisterHandler<OpenFileRequest>(HandleOpenFileRequestAsync);
         _messageRouter.RegisterHandler<RequestLinesMessage>(HandleRequestLinesAsync);
-        _messageRouter.RegisterHandler<RequestLineChunk>(HandleRequestLineChunkAsync);
+        _messageRouter.RegisterHandler<RequestLineChunkBatch>(HandleRequestLineChunkBatchAsync);
         _messageRouter.RegisterHandler<RequestViewport>(HandleRequestViewportAsync);
 
         // Subscribe to stale file detection — route through debounced refresh.
@@ -453,65 +453,58 @@ public class PhotinoHostService
     }
 
     /// <summary>
-    /// Handle a <see cref="RequestLineChunk"/> from the React frontend:
-    /// read the requested chunk of a large line and send it back.
+    /// Handle a <see cref="RequestLineChunkBatch"/> from the React frontend:
+    /// read all requested chunks and return them in a single batch response.
+    /// All-or-nothing: if any chunk read fails, send a single ErrorResponse and return.
     /// </summary>
-    private async Task HandleRequestLineChunkAsync(RequestLineChunk request)
+    private async Task HandleRequestLineChunkBatchAsync(RequestLineChunkBatch request)
     {
-        try
+        if (string.IsNullOrEmpty(_currentFilePath))
         {
-            if (string.IsNullOrEmpty(_currentFilePath))
+            await _messageRouter.SendToUIAsync(new ErrorResponse
+            {
+                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                Message = "No file is currently open."
+            });
+            return;
+        }
+
+        var results = new ChunkResponseItem[request.Items.Length];
+
+        for (int i = 0; i < request.Items.Length; i++)
+        {
+            var item = request.Items[i];
+            try
+            {
+                var result = await _fileService.ReadLineChunkAsync(
+                    _currentFilePath, item.LineNumber, item.StartColumn, item.ColumnCount);
+
+                results[i] = new ChunkResponseItem
+                {
+                    LineNumber = result.LineNumber,
+                    StartColumn = result.StartColumn,
+                    Text = result.Text,
+                    TotalLineChars = result.TotalLineChars,
+                    HasMore = result.HasMore
+                };
+            }
+            catch (Exception ex)
             {
                 await _messageRouter.SendToUIAsync(new ErrorResponse
                 {
-                    ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
-                    Message = "No file is currently open."
+                    ErrorCode = ex is ArgumentOutOfRangeException
+                        ? Models.ErrorCode.UNKNOWN_ERROR.ToString()
+                        : ex is FileNotFoundException
+                            ? Models.ErrorCode.FILE_NOT_FOUND.ToString()
+                            : Models.ErrorCode.UNKNOWN_ERROR.ToString(),
+                    Message = "A chunk read failed within the batch.",
+                    Details = ex.Message
                 });
                 return;
             }
+        }
 
-            var result = await _fileService.ReadLineChunkAsync(
-                _currentFilePath, request.LineNumber, request.StartColumn, request.ColumnCount);
-
-            await _messageRouter.SendToUIAsync(new LineChunkResponse
-            {
-                LineNumber = result.LineNumber,
-                StartColumn = result.StartColumn,
-                Text = result.Text,
-                TotalLineChars = result.TotalLineChars,
-                HasMore = result.HasMore
-            });
-        }
-        catch (ArgumentOutOfRangeException ex)
-        {
-            Console.Error.WriteLine($"[ERROR] Invalid line number in chunk request: {ex}\n{ex}");
-            await _messageRouter.SendToUIAsync(new ErrorResponse
-            {
-                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
-                Message = "Invalid line number specified.",
-                Details = ex.Message
-            });
-        }
-        catch (FileNotFoundException ex)
-        {
-            Console.Error.WriteLine($"[ERROR] File not found during chunk read: {ex.FileName}\n{ex}");
-            await _messageRouter.SendToUIAsync(new ErrorResponse
-            {
-                ErrorCode = Models.ErrorCode.FILE_NOT_FOUND.ToString(),
-                Message = "The file could not be found. It may have been moved or deleted.",
-                Details = ex.FileName
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[ERROR] Error reading line chunk\n{ex}");
-            await _messageRouter.SendToUIAsync(new ErrorResponse
-            {
-                ErrorCode = Models.ErrorCode.UNKNOWN_ERROR.ToString(),
-                Message = "An unexpected error occurred while reading the line chunk.",
-                Details = ex.Message
-            });
-        }
+        await _messageRouter.SendToUIAsync(new LineChunkBatchResponse { Items = results });
     }
 
     /// <summary>

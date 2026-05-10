@@ -26,13 +26,15 @@ interface LinesResponsePayload {
   lineLengths?: number[];
 }
 
-/** Payload from a LineChunkResponse message. */
-interface LineChunkPayload {
-  lineNumber: number;
-  startColumn: number;
-  text: string;
-  totalLineChars: number;
-  hasMore: boolean;
+/** Payload from a LineChunkBatchResponse message. */
+interface LineChunkBatchPayload {
+  items: Array<{
+    lineNumber: number;
+    startColumn: number;
+    text: string;
+    totalLineChars: number;
+    hasMore: boolean;
+  }>;
 }
 
 /** Error information sent from the backend. */
@@ -60,10 +62,10 @@ interface MessageEnvelope {
 const MessageTypes = {
   OpenFileRequest: 'OpenFileRequest',
   RequestLinesMessage: 'RequestLinesMessage',
-  RequestLineChunk: 'RequestLineChunk',
+  RequestLineChunkBatch: 'RequestLineChunkBatch',
   FileOpenedResponse: 'FileOpenedResponse',
   LinesResponse: 'LinesResponse',
-  LineChunkResponse: 'LineChunkResponse',
+  LineChunkBatchResponse: 'LineChunkBatchResponse',
   ErrorResponse: 'ErrorResponse',
   FileLoadProgressMessage: 'FileLoadProgressMessage',
 } as const;
@@ -75,10 +77,10 @@ const MessageTypes = {
 interface InteropService {
   sendOpenFileRequest(): void;
   sendRequestLines(startLine: number, lineCount: number, startColumn?: number, columnCount?: number): void;
-  sendRequestLineChunk(lineNumber: number, startColumn: number, columnCount: number): void;
+  sendRequestLineChunkBatch(items: Array<{ lineNumber: number; startColumn: number; columnCount: number }>): void;
   onFileOpened(callback: (data: FileMeta) => void): void;
   onLinesResponse(callback: (data: LinesResponsePayload) => void): void;
-  onLineChunkResponse(callback: (data: LineChunkPayload) => void): void;
+  onLineChunkBatchResponse(callback: (data: LineChunkBatchPayload) => void): void;
   onFileLoadProgress(callback: (data: FileLoadProgressPayload) => void): void;
   onError(callback: (error: ErrorInfo) => void): void;
   dispose(): void;
@@ -94,7 +96,7 @@ interface InteropService {
 function createInteropService(): InteropService {
   const fileOpenedCallbacks: Array<(data: FileMeta) => void> = [];
   const linesResponseCallbacks: Array<(data: LinesResponsePayload) => void> = [];
-  const lineChunkResponseCallbacks: Array<(data: LineChunkPayload) => void> = [];
+  const lineChunkBatchResponseCallbacks: Array<(data: LineChunkBatchPayload) => void> = [];
   const fileLoadProgressCallbacks: Array<(data: FileLoadProgressPayload) => void> = [];
   const errorCallbacks: Array<(error: ErrorInfo) => void> = [];
 
@@ -129,9 +131,9 @@ function createInteropService(): InteropService {
         }
         break;
 
-      case MessageTypes.LineChunkResponse:
-        for (const cb of lineChunkResponseCallbacks) {
-          cb(envelope.payload as LineChunkPayload);
+      case MessageTypes.LineChunkBatchResponse:
+        for (const cb of lineChunkBatchResponseCallbacks) {
+          cb(envelope.payload as LineChunkBatchPayload);
         }
         break;
 
@@ -235,10 +237,10 @@ function createInteropService(): InteropService {
       }
     },
 
-    sendRequestLineChunk(lineNumber: number, startColumn: number, columnCount: number): void {
+    sendRequestLineChunkBatch(items: Array<{ lineNumber: number; startColumn: number; columnCount: number }>): void {
       const envelope: MessageEnvelope = {
-        type: MessageTypes.RequestLineChunk,
-        payload: { lineNumber, startColumn, columnCount },
+        type: MessageTypes.RequestLineChunkBatch,
+        payload: { items },
         timestamp: new Date().toISOString(),
       };
 
@@ -263,8 +265,8 @@ function createInteropService(): InteropService {
       linesResponseCallbacks.push(callback);
     },
 
-    onLineChunkResponse(callback: (data: LineChunkPayload) => void): void {
-      lineChunkResponseCallbacks.push(callback);
+    onLineChunkBatchResponse(callback: (data: LineChunkBatchPayload) => void): void {
+      lineChunkBatchResponseCallbacks.push(callback);
     },
 
     onError(callback: (error: ErrorInfo) => void): void {
@@ -280,7 +282,7 @@ function createInteropService(): InteropService {
       window.removeEventListener('message', handleDomMessage);
       fileOpenedCallbacks.length = 0;
       linesResponseCallbacks.length = 0;
-      lineChunkResponseCallbacks.length = 0;
+      lineChunkBatchResponseCallbacks.length = 0;
       fileLoadProgressCallbacks.length = 0;
       errorCallbacks.length = 0;
     },
