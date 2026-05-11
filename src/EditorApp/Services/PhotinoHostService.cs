@@ -17,6 +17,7 @@ public class PhotinoHostService
     private readonly IMessageRouter _messageRouter;
     private readonly IFileService _fileService;
     private readonly IViewportService? _viewportService;
+    private readonly string? _initialFilePath;
 
     /// <summary>
     /// Lock for all _refreshCts and _scanCts dispose/create operations.
@@ -100,12 +101,13 @@ public class PhotinoHostService
     /// </summary>
     private Action<string>? _staleFileHandler;
 
-    public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService, IViewportService? viewportService = null)
+    public PhotinoHostService(PhotinoBlazorApp app, IMessageRouter messageRouter, IFileService fileService, IViewportService? viewportService = null, string? initialFilePath = null)
     {
         _app = app ?? throw new ArgumentNullException(nameof(app));
         _messageRouter = messageRouter ?? throw new ArgumentNullException(nameof(messageRouter));
         _fileService = fileService ?? throw new ArgumentNullException(nameof(fileService));
         _viewportService = viewportService;
+        _initialFilePath = initialFilePath;
 
         ConfigureWindow();
         RegisterMessageHandlers();
@@ -130,6 +132,23 @@ public class PhotinoHostService
     public void Run()
     {
         _messageRouter.StartListening();
+
+        // If a file path was provided via CLI, open it once the window is ready.
+        // Use a delay to ensure the frontend React app has mounted and registered
+        // its message listeners before we send FileOpenedResponse.
+        if (_initialFilePath is not null)
+        {
+            var filePath = _initialFilePath;
+            _app.MainWindow.RegisterWindowCreatedHandler((sender, args) =>
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    await OpenFileByPathAsync(filePath);
+                });
+            });
+        }
+
         _app.Run();
     }
 
@@ -308,6 +327,9 @@ public class PhotinoHostService
                 IsPartial = false,
                 MaxLineLength = metadata.MaxLineLength
             });
+
+            // Update window title to reflect the opened file
+            _app?.MainWindow.SetTitle($"{metadata.FileName} — Editor");
 
             // Push viewport content after scan completion for large files.
             // Small files (no partialWasEmitted) skip this entirely.

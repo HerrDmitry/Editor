@@ -1,0 +1,5 @@
+{
+  "specType": "feature",
+  "workflowType": "fast-task",
+  "featureName": "cli-file-open"
+}

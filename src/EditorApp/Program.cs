@@ -30,9 +30,19 @@ public class Program
         var messageRouter = new MessageRouter(messagingAdapter);
         var viewportService = new ViewportService(fileService);
 
+        // Extract file path from CLI arguments (first positional, non-flag arg).
+        string? initialFilePath = null;
+        if (args.Length > 0 && !args[0].StartsWith('-'))
+        {
+            var raw = args[0];
+            initialFilePath = Path.IsPathRooted(raw)
+                ? raw
+                : Path.GetFullPath(raw, Environment.CurrentDirectory);
+        }
+
         // Create the host service — this configures the window (1200×800,
         // centered, resizable, title "Editor") and registers message handlers.
-        var hostService = new PhotinoHostService(app, messageRouter, fileService, viewportService);
+        var hostService = new PhotinoHostService(app, messageRouter, fileService, viewportService, initialFilePath);
 
         // Initialize keyboard shortcut handler.
         var shortcutHandler = new KeyboardShortcutHandler(messageRouter);
