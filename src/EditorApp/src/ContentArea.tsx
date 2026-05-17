@@ -923,7 +923,7 @@ function ContentArea({ fileMeta, lines, linesStartLine, lineLengths, isLoading, 
                 style={{ display: 'flex', flexDirection: 'row', minHeight: LINE_HEIGHT }}
               >
                 <div
-                  className="line-number-row"
+                  className={`line-number-row${wrapLines ? ' line-number-row--sticky' : ''}`}
                   style={{
                     flexShrink: 0, width: 60, textAlign: 'right', paddingRight: 12,
                     alignSelf: 'flex-start', height: LINE_HEIGHT, lineHeight: `${LINE_HEIGHT}px`,

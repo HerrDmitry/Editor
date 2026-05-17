@@ -163,6 +163,13 @@ html, body {
   font-size: 14px;
 }
 
+.line-number-row--sticky {
+  position: sticky;
+  top: 0;
+  background-color: #1e1e1e;
+  z-index: 1;
+}
+
 /* Hide native vertical scrollbar but keep scroll functionality */
 .content-column--hidden-scrollbar {
   scrollbar-width: none; /* Firefox */
